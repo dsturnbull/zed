@@ -216,6 +216,20 @@ pub fn into_anthropic(
         }
     }
 
+    // Anthropic requires that thinking blocks come before all other content in
+    // assistant messages. When consecutive assistant messages are merged (e.g.,
+    // an incomplete response followed by a complete one), text blocks can end
+    // up before thinking blocks, violating this constraint. Use a stable sort
+    // to move thinking blocks to the front while preserving relative order.
+    for message in &mut new_messages {
+        if message.role == crate::Role::Assistant {
+            message.content.sort_by_key(|block| match block {
+                RequestContent::Thinking { .. } | RequestContent::RedactedThinking { .. } => 0,
+                _ => 1,
+            });
+        }
+    }
+
     // When caching is enabled, mark the static prefix (tools + system) with an
     // explicit long-TTL breakpoint, and let Anthropic's automatic top-level
     // cache_control handle the short-TTL conversation breakpoint. Anthropic
