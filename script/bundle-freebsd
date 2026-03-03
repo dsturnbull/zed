@@ -62,12 +62,14 @@ export RUSTFLAGS="${RUSTFLAGS:-} -C link-args=-Wl,--disable-new-dtags,-rpath,\$O
 #     export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+crt-static"
 # fi
 cargo build --release --target "${remote_server_triple}" --package remote_server
+cargo build --release --target "${remote_server_triple}" --package pty_host_bin
 
 # Strip debug symbols and save them for upload to DigitalOcean
 # objcopy --only-keep-debug "${target_dir}/${target_triple}/release/zed" "${target_dir}/${target_triple}/release/zed.dbg"
 # objcopy --only-keep-debug "${target_dir}/${remote_server_triple}/release/remote_server" "${target_dir}/${remote_server_triple}/release/remote_server.dbg"
 # objcopy --strip-debug "${target_dir}/${target_triple}/release/zed"
 # objcopy --strip-debug "${target_dir}/${target_triple}/release/cli"
+# objcopy --strip-debug "${target_dir}/${target_triple}/release/pty-host"
 # objcopy --strip-debug "${target_dir}/${remote_server_triple}/release/remote_server"
 
 # gzip -f "${target_dir}/${target_triple}/release/zed.dbg"
@@ -103,6 +105,7 @@ fi
 # mkdir -p "${zed_dir}/bin" "${zed_dir}/libexec"
 # cp "${target_dir}/${target_triple}/release/zed" "${zed_dir}/libexec/zed-editor"
 # cp "${target_dir}/${target_triple}/release/cli" "${zed_dir}/bin/zed"
+# cp "${target_dir}/${target_triple}/release/pty-host" "${zed_dir}/bin/pty-host"
 
 # Libs
 # find_libs() {

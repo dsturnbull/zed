@@ -43,6 +43,8 @@ url.workspace = true
 util.workspace = true
 urlencoding.workspace = true
 parking_lot.workspace = true
+pty_host.workspace = true
+uuid.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows.workspace = true

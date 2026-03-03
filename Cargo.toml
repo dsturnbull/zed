@@ -147,6 +147,7 @@ members = [
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
+    "crates/pty_host_bin",
     "crates/project_symbols",
     "crates/prompt_store",
     "crates/proto",
@@ -408,6 +409,9 @@ remote_connection = { path = "crates/remote_connection" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
+
+pty_host = { git = "https://github.com/dsturnbull/pty-host", rev = "2cf45f72d70ce17808a3d2bf6b9814b693c4af3e" }
+pty_host_bin = { path = "crates/pty_host_bin" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
@@ -851,6 +855,9 @@ features = [
     "Win32_UI_WindowsAndMessaging",
     "Win32_Media",
 ]
+
+[patch."https://github.com/zed-industries/alacritty"]
+alacritty_terminal = { git = "https://github.com/dsturnbull/alacritty", rev = "36fd512ff4cd4927fb3c54847d5fda2d9f9cc8bb" }
 
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
