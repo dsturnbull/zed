@@ -17445,7 +17445,6 @@ dependencies = [
  "pretty_assertions",
  "project",
  "pty_host",
- "rand 0.9.2",
  "regex",
  "schemars",
  "serde",
