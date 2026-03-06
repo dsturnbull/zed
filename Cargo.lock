@@ -13491,7 +13491,7 @@ dependencies = [
 [[package]]
 name = "pty_host"
 version = "0.1.0"
-source = "git+https://github.com/dsturnbull/pty-host?rev=2cf45f72d70ce17808a3d2bf6b9814b693c4af3e#2cf45f72d70ce17808a3d2bf6b9814b693c4af3e"
+source = "git+https://github.com/dsturnbull/pty-host?rev=b4a9ee1afbce0bf4e371b88ff9ba952659b50ed1#b4a9ee1afbce0bf4e371b88ff9ba952659b50ed1"
 dependencies = [
  "alacritty_terminal",
  "anyhow",
