@@ -845,6 +845,9 @@ features = [
     "Win32_Media",
 ]
 
+[patch."https://github.com/zed-industries/alacritty"]
+alacritty_terminal = { path = "/Users/dtrnbull/src/wt/osc133-semantic-zones/alacritty_terminal" }
+
 [patch.crates-io]
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 notify = { git = "https://github.com/zed-industries/notify.git", rev = "ce58c24cad542c28e04ced02e20325a4ec28a31d" }

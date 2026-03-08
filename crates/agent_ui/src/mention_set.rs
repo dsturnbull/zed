@@ -1222,3 +1222,149 @@ async fn fetch_url_content(http_client: Arc<HttpClientWithUrl>, url: String) -> 
         }
     }
 }
+
+/// Insert a terminal output as an expandable crease (code block that folds).
+/// Shared between the paste handler and the `@terminal` completion provider.
+pub(crate) fn insert_terminal_output_crease(
+    editor: Entity<Editor>,
+    mention_set: WeakEntity<MentionSet>,
+    output: &str,
+    command: Option<&str>,
+    terminal_id: Option<u64>,
+    icon_path: &SharedString,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use acp_thread::MentionUri;
+    use editor::display_map::Crease;
+    use ui::{ButtonLike, ButtonSize, ButtonStyle, Color, Icon, IconName, IconSize, Label};
+
+    let line_count = output.lines().count() as u32;
+    let mention_uri = MentionUri::TerminalSelection {
+        line_count,
+        command: command.map(|s| s.to_string()),
+        terminal_id,
+        scroll_line: None,
+        scroll_col: None,
+    };
+
+    let formatted_text = format!("```console\n{}\n```", output);
+    let crease_label: SharedString = mention_uri.name().into();
+    let editor_weak = editor.downgrade();
+    let icon_path = icon_path.clone();
+
+    editor.update(cx, |editor, cx| {
+        let point = editor
+            .selections
+            .newest::<rope::Point>(&editor.display_snapshot(cx))
+            .head();
+        if point.column > 0 {
+            editor.insert("\n", window, cx);
+        }
+
+        let point = editor
+            .selections
+            .newest::<rope::Point>(&editor.display_snapshot(cx))
+            .head();
+        let start_row = multi_buffer::MultiBufferRow(point.row);
+
+        editor.insert(&formatted_text, window, cx);
+
+        let snapshot = editor.buffer().read(cx).snapshot(cx);
+        let anchor_before = snapshot.anchor_after(point);
+        let anchor_after = editor
+            .selections
+            .newest_anchor()
+            .head()
+            .bias_left(&snapshot);
+
+        let fold_placeholder = FoldPlaceholder {
+            render: Arc::new({
+                let crease_label = crease_label.clone();
+                let icon_path = icon_path.clone();
+                let editor_weak = editor_weak.clone();
+                move |fold_id, fold_range, _cx| {
+                    let editor_weak = editor_weak.clone();
+                    let fold_range = fold_range.clone();
+                    ButtonLike::new(fold_id)
+                        .style(ButtonStyle::Filled)
+                        .layer(ui::ElevationIndex::ElevatedSurface)
+                        .child(
+                            Icon::from_path(icon_path.clone())
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new(crease_label.clone()).single_line())
+                        .on_click(move |_, window, cx| {
+                            editor_weak
+                                .update(cx, |editor, cx| {
+                                    let buffer_start = fold_range
+                                        .start
+                                        .to_offset(&editor.buffer().read(cx).read(cx));
+                                    let point = editor
+                                        .buffer()
+                                        .read(cx)
+                                        .read(cx)
+                                        .offset_to_point(buffer_start);
+                                    let buffer_row = multi_buffer::MultiBufferRow(point.row);
+                                    editor.unfold_at(buffer_row, window, cx);
+                                })
+                                .ok();
+                        })
+                        .into_any_element()
+                }
+            }),
+            merge_adjacent: false,
+            ..Default::default()
+        };
+
+        let editor_for_trailer = editor_weak.clone();
+        let crease = Crease::inline(
+            anchor_before..anchor_after,
+            fold_placeholder,
+            |_row, _is_folded, _fold, _window, _cx| gpui::Empty,
+            move |row: multi_buffer::MultiBufferRow,
+                  is_folded: bool,
+                  _window: &mut Window,
+                  _cx: &mut App| {
+                if is_folded {
+                    return gpui::Empty.into_any_element();
+                }
+                let editor_for_trailer = editor_for_trailer.clone();
+                ButtonLike::new(("terminal-crease-collapse", row.0 as u64))
+                    .style(ButtonStyle::Subtle)
+                    .size(ButtonSize::Compact)
+                    .child(
+                        Icon::new(IconName::ChevronUp)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .on_click(move |_, window, cx| {
+                        editor_for_trailer
+                            .update(cx, |editor, cx| {
+                                editor.fold_at(row, window, cx);
+                            })
+                            .ok();
+                    })
+                    .into_any_element()
+            },
+        );
+        let crease_ids = editor.insert_creases(vec![crease], cx);
+        editor.fold_at(start_row, window, cx);
+
+        if let Some(crease_id) = crease_ids.first().copied() {
+            let output_owned = output.to_string();
+            let mention_task = Task::ready(Ok(Mention::Text {
+                content: output_owned,
+                tracked_buffers: vec![],
+            }))
+            .shared();
+
+            mention_set
+                .update(cx, |mention_set, _| {
+                    mention_set.insert_mention(crease_id, mention_uri, mention_task);
+                })
+                .ok();
+        }
+    });
+}

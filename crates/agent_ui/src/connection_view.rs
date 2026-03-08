@@ -2568,7 +2568,7 @@ impl ConnectionView {
         if let Some(active_thread) = self.active_thread() {
             active_thread.update(cx, |thread, cx| {
                 thread.message_editor.update(cx, |editor, cx| {
-                    editor.insert_terminal_crease(text, window, cx);
+                    editor.insert_terminal_crease(text, None, None, None, None, window, cx);
                 })
             });
         }

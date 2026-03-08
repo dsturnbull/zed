@@ -1168,6 +1168,8 @@
       "ctrl-alt-r": "terminal::RerunTask",
       "alt-t": "terminal::RerunTask",
       "ctrl-shift-5": "pane::SplitRight",
+      "ctrl-alt-up": "terminal::ScrollToPreviousPrompt",
+      "ctrl-alt-down": "terminal::ScrollToNextPrompt",
       "ctrl->": "agent::AddSelectionToThread",
     },
   },

@@ -183,10 +183,17 @@ fn open_mention_uri(
         MentionUri::Fetch { url } => {
             cx.open_url(url.as_str());
         }
+        MentionUri::TerminalSelection {
+            terminal_id,
+            scroll_line,
+            scroll_col,
+            ..
+        } => {
+            scroll_to_terminal_source(workspace, terminal_id, scroll_line, scroll_col, window, cx);
+        }
         MentionUri::PastedImage
         | MentionUri::Selection { abs_path: None, .. }
         | MentionUri::Diagnostics { .. }
-        | MentionUri::TerminalSelection { .. }
         | MentionUri::GitDiff { .. } => {}
     });
 }
@@ -276,6 +283,42 @@ fn open_thread(
 
     panel.update(cx, |panel, cx| {
         panel.load_agent_thread(id, None, Some(name.into()), window, cx)
+    });
+}
+
+fn scroll_to_terminal_source(
+    workspace: &mut Workspace,
+    terminal_id: Option<u64>,
+    scroll_line: Option<i32>,
+    scroll_col: Option<usize>,
+    window: &mut Window,
+    cx: &mut Context<Workspace>,
+) {
+    use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+    use terminal_view::terminal_panel::TerminalPanel;
+
+    let Some(id) = terminal_id else {
+        return;
+    };
+
+    let Some(panel) = workspace.panel::<TerminalPanel>(cx) else {
+        return;
+    };
+
+    let Some((terminal_view, _)) = panel.read(cx).find_terminal_by_id(id, cx) else {
+        return;
+    };
+
+    let point = AlacPoint::new(
+        Line(scroll_line.unwrap_or(0)),
+        Column(scroll_col.unwrap_or(0)),
+    );
+
+    workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
+    terminal_view.update(cx, |view, cx| {
+        view.terminal().update(cx, |terminal, _| {
+            terminal.scroll_to_point(point);
+        });
     });
 }
 

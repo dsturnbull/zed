@@ -1251,6 +1251,8 @@
       "ctrl-alt-right": "pane::SplitRight",
       "cmd-d": "pane::SplitRight",
       "cmd-alt-r": "terminal::RerunTask",
+      "cmd-alt-up": "terminal::ScrollToPreviousPrompt",
+      "cmd-alt-down": "terminal::ScrollToNextPrompt",
       "cmd->": "agent::AddSelectionToThread",
     },
   },

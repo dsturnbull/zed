@@ -1,5 +1,7 @@
 use crate::SendImmediately;
 use crate::ThreadHistory;
+use terminal::TerminalClipboardMetadata;
+
 use crate::{
     ChatWithFollow,
     completion_provider::{
@@ -80,6 +82,7 @@ impl PromptCompletionProviderDelegate for Entity<MessageEditor> {
                 PromptContextType::Diagnostics,
                 PromptContextType::Fetch,
                 PromptContextType::Rules,
+                PromptContextType::Terminal,
             ]);
         }
         supported
@@ -639,15 +642,60 @@ impl MessageEditor {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        let editor_clipboard_selections = cx
-            .read_from_clipboard()
-            .and_then(|item| item.entries().first().cloned())
-            .and_then(|entry| match entry {
-                ClipboardEntry::String(text) => {
-                    text.metadata_json::<Vec<editor::ClipboardSelection>>()
+        let clipboard = cx.read_from_clipboard();
+        let first_entry = clipboard
+            .as_ref()
+            .and_then(|item| item.entries().first().cloned());
+
+        // Check for terminal clipboard metadata first — terminal copies are
+        // tagged with TerminalClipboardMetadata so we can create a crease
+        // instead of pasting plain text.
+        let terminal_metadata = first_entry.as_ref().and_then(|entry| match entry {
+            ClipboardEntry::String(text) => {
+                let meta = text.metadata_json::<TerminalClipboardMetadata>();
+                log::info!(
+                    "Paste: clipboard has string entry, terminal metadata: {:?}",
+                    meta.is_some()
+                );
+                meta
+            }
+            other => {
+                log::info!("Paste: clipboard entry is not a string: {:?}", std::mem::discriminant(other));
+                None
+            }
+        });
+
+        if let Some(metadata) = terminal_metadata {
+            let clipboard_text = clipboard.as_ref().and_then(|item| item.text());
+            log::info!(
+                "Paste: terminal metadata found, command={:?}, terminal_id={:?}, text_len={:?}",
+                metadata.command,
+                metadata.terminal_id,
+                clipboard_text.as_ref().map(|t| t.len()),
+            );
+            if let Some(text) = clipboard_text {
+                if !text.is_empty() {
+                    cx.stop_propagation();
+                    self.insert_terminal_crease(
+                        text.to_string(),
+                        metadata.command,
+                        metadata.terminal_id,
+                        metadata.scroll_line,
+                        metadata.scroll_col,
+                        window,
+                        cx,
+                    );
+                    return;
                 }
-                _ => None,
-            });
+            }
+        }
+
+        let editor_clipboard_selections = first_entry.and_then(|entry| match entry {
+            ClipboardEntry::String(text) => {
+                text.metadata_json::<Vec<editor::ClipboardSelection>>()
+            }
+            _ => None,
+        });
 
         // Insert creases for pasted clipboard selections that:
         // 1. Contain exactly one selection
@@ -987,57 +1035,32 @@ impl MessageEditor {
     pub fn insert_terminal_crease(
         &mut self,
         text: String,
+        command: Option<String>,
+        terminal_id: Option<u64>,
+        _scroll_line: Option<i32>,
+        _scroll_col: Option<usize>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let line_count = text.lines().count() as u32;
-        let mention_uri = MentionUri::TerminalSelection { line_count };
-        let mention_text = mention_uri.as_link().to_string();
+        let icon_path = MentionUri::TerminalSelection {
+            line_count: 0,
+            command: None,
+            terminal_id: None,
+            scroll_line: None,
+            scroll_col: None,
+        }
+        .icon_path(cx);
 
-        let (excerpt_id, text_anchor, content_len) = self.editor.update(cx, |editor, cx| {
-            let buffer = editor.buffer().read(cx);
-            let snapshot = buffer.snapshot(cx);
-            let (excerpt_id, _, buffer_snapshot) = snapshot.as_singleton().unwrap();
-            let text_anchor = editor
-                .selections
-                .newest_anchor()
-                .start
-                .text_anchor
-                .bias_left(&buffer_snapshot);
-
-            editor.insert(&mention_text, window, cx);
-            editor.insert(" ", window, cx);
-
-            (excerpt_id, text_anchor, mention_text.len())
-        });
-
-        let Some((crease_id, tx)) = insert_crease_for_mention(
-            excerpt_id,
-            text_anchor,
-            content_len,
-            mention_uri.name().into(),
-            mention_uri.icon_path(cx),
-            mention_uri.tooltip_text(),
-            Some(mention_uri.clone()),
-            Some(self.workspace.clone()),
-            None,
+        crate::mention_set::insert_terminal_output_crease(
             self.editor.clone(),
+            self.mention_set.downgrade(),
+            &text,
+            command.as_deref(),
+            terminal_id,
+            &icon_path,
             window,
             cx,
-        ) else {
-            return;
-        };
-        drop(tx);
-
-        let mention_task = Task::ready(Ok(Mention::Text {
-            content: text,
-            tracked_buffers: vec![],
-        }))
-        .shared();
-
-        self.mention_set.update(cx, |mention_set, _| {
-            mention_set.insert_mention(crease_id, mention_uri, mention_task);
-        });
+        );
     }
 
     fn insert_crease_impl(

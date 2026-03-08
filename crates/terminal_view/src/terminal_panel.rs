@@ -1093,23 +1093,123 @@ impl TerminalPanel {
 
     /// Returns all non-empty terminal selections from all terminal views in all panes.
     pub fn terminal_selections(&self, cx: &App) -> Vec<String> {
+        self.terminal_selections_with_commands(cx)
+            .into_iter()
+            .map(|(text, _command)| text)
+            .collect()
+    }
+
+    /// Returns all non-empty terminal selections paired with the shell command
+    /// that produced them (if known from OSC 133 shell integration markers).
+    ///
+    /// Each entry is `(selection_text, Option<command>)`. The command comes from
+    /// `Terminal::last_copy_snapshot` which is populated at copy time.
+    pub fn terminal_selections_with_commands(
+        &self,
+        cx: &App,
+    ) -> Vec<(String, Option<String>)> {
         self.center
             .panes()
             .iter()
             .flat_map(|pane| {
                 pane.read(cx).items().filter_map(|item| {
                     let terminal_view = item.downcast::<crate::TerminalView>()?;
-                    terminal_view
-                        .read(cx)
-                        .terminal()
-                        .read(cx)
+                    let terminal = terminal_view.read(cx).terminal().read(cx);
+                    let text = terminal
                         .last_content
                         .selection_text
                         .clone()
-                        .filter(|text| !text.is_empty())
+                        .filter(|text| !text.is_empty())?;
+                    let command = terminal
+                        .last_copy_snapshot
+                        .as_ref()
+                        .and_then(|snapshot| snapshot.command.clone());
+                    Some((text, command))
                 })
             })
             .collect()
+    }
+
+    /// Returns recent command outputs from all terminals that have OSC 133
+    /// shell integration markers. Each entry is `(command_name, output_text)`.
+    /// Returns up to `limit` most recent commands across all terminals.
+    pub fn recent_command_outputs(&self, limit: usize, cx: &App) -> Vec<(String, String)> {
+        let mut results = Vec::new();
+        for pane in self.center.panes() {
+            for item in pane.read(cx).items() {
+                let Some(terminal_view) = item.downcast::<crate::TerminalView>() else {
+                    continue;
+                };
+                let terminal = terminal_view.read(cx).terminal().read(cx);
+                let remaining = limit.saturating_sub(results.len());
+                if remaining == 0 {
+                    return results;
+                }
+                results.extend(terminal.recent_command_outputs(remaining));
+            }
+        }
+        results
+    }
+
+    /// Finds a terminal view by its entity id (as u64), returning the view
+    /// and the scroll position from its last copy snapshot.
+    pub fn find_terminal_by_id(
+        &self,
+        terminal_id: u64,
+        cx: &App,
+    ) -> Option<(Entity<crate::TerminalView>, terminal::alacritty_terminal::index::Point)> {
+        for pane in self.center.panes() {
+            for item in pane.read(cx).items() {
+                let Some(terminal_view) = item.downcast::<crate::TerminalView>() else {
+                    continue;
+                };
+                let terminal = terminal_view.read(cx).terminal().read(cx);
+                if terminal_view.read(cx).terminal().entity_id().as_u64() == terminal_id {
+                    let scroll_top = terminal
+                        .last_copy_snapshot
+                        .as_ref()
+                        .map(|s| s.scroll_top)
+                        .unwrap_or_default();
+                    return Some((terminal_view, scroll_top));
+                }
+            }
+        }
+        None
+    }
+
+    /// Finds the terminal view whose `last_copy_snapshot` matches the given
+    /// command name, returning the view and the scroll position to restore.
+    /// If `command` is `None`, returns the first terminal with any snapshot.
+    pub fn find_terminal_with_snapshot(
+        &self,
+        command: Option<&str>,
+        cx: &App,
+    ) -> Option<(Entity<crate::TerminalView>, terminal::alacritty_terminal::index::Point)> {
+        let mut fallback = None;
+        for pane in self.center.panes() {
+            for item in pane.read(cx).items() {
+                let Some(terminal_view) = item.downcast::<crate::TerminalView>() else {
+                    continue;
+                };
+                let terminal = terminal_view.read(cx).terminal().read(cx);
+                let Some(snapshot) = &terminal.last_copy_snapshot else {
+                    continue;
+                };
+                let scroll_top = snapshot.scroll_top;
+                if let Some(cmd) = command {
+                    if snapshot.command.as_deref() == Some(cmd) {
+                        return Some((terminal_view, scroll_top));
+                    }
+                }
+                if fallback.is_none() {
+                    fallback = Some((terminal_view, scroll_top));
+                }
+            }
+        }
+        if command.is_none() {
+            return fallback;
+        }
+        fallback
     }
 
     fn is_enabled(&self, cx: &App) -> bool {

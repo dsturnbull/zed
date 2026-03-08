@@ -64,6 +64,7 @@ pub(crate) enum PromptContextType {
     Thread,
     Rules,
     Diagnostics,
+    Terminal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +103,7 @@ impl TryFrom<&str> for PromptContextType {
             "thread" => Ok(Self::Thread),
             "rule" => Ok(Self::Rules),
             "diagnostics" => Ok(Self::Diagnostics),
+            "terminal" => Ok(Self::Terminal),
             _ => Err(format!("Invalid context picker mode: {}", value)),
         }
     }
@@ -116,6 +118,7 @@ impl PromptContextType {
             Self::Thread => "thread",
             Self::Rules => "rule",
             Self::Diagnostics => "diagnostics",
+            Self::Terminal => "terminal",
         }
     }
 
@@ -127,6 +130,7 @@ impl PromptContextType {
             Self::Thread => "Threads",
             Self::Rules => "Rules",
             Self::Diagnostics => "Diagnostics",
+            Self::Terminal => "Terminal Output",
         }
     }
 
@@ -138,6 +142,7 @@ impl PromptContextType {
             Self::Thread => IconName::Thread,
             Self::Rules => IconName::Reader,
             Self::Diagnostics => IconName::Warning,
+            Self::Terminal => IconName::Terminal,
         }
     }
 }
@@ -549,7 +554,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                     .collect();
 
                 // Collect terminal selections from all terminal views if the terminal panel is visible
-                let terminal_selections: Vec<String> =
+                let terminal_selections: Vec<(String, Option<String>)> =
                     terminal_selections_if_panel_open(workspace, cx);
 
                 const EDITOR_PLACEHOLDER: &str = "selection ";
@@ -571,14 +576,15 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                 let mut new_text: String = EDITOR_PLACEHOLDER.repeat(selections.len());
 
                 // Add terminal placeholders for each terminal selection
-                let terminal_ranges: Vec<(String, std::ops::Range<usize>)> = terminal_selections
-                    .into_iter()
-                    .map(|text| {
-                        let start = new_text.len();
-                        new_text.push_str(TERMINAL_PLACEHOLDER);
-                        (text, start..(new_text.len() - 1))
-                    })
-                    .collect();
+                let terminal_ranges: Vec<(String, Option<String>, std::ops::Range<usize>)> =
+                    terminal_selections
+                        .into_iter()
+                        .map(|(text, command)| {
+                            let start = new_text.len();
+                            new_text.push_str(TERMINAL_PLACEHOLDER);
+                            (text, command, start..(new_text.len() - 1))
+                        })
+                        .collect();
 
                 let callback = Arc::new({
                     let source_range = source_range.clone();
@@ -606,7 +612,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                                 }
 
                                 // Insert terminal selections
-                                for (terminal_text, terminal_range) in terminal_ranges {
+                                for (terminal_text, terminal_command, terminal_range) in terminal_ranges {
                                     let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
                                     let Some(start) =
                                         snapshot.as_singleton_anchor(source_range.start)
@@ -616,7 +622,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                                     let offset = start.to_offset(&snapshot);
 
                                     let line_count = terminal_text.lines().count() as u32;
-                                    let mention_uri = MentionUri::TerminalSelection { line_count };
+                                    let mention_uri = MentionUri::TerminalSelection { line_count, command: terminal_command, terminal_id: None, scroll_line: None, scroll_col: None };
                                     let range = snapshot.anchor_after(offset + terminal_range.start)
                                         ..snapshot.anchor_after(offset + terminal_range.end);
 
@@ -781,6 +787,86 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
         }
     }
 
+    fn completions_for_terminal(
+        source_range: Range<Anchor>,
+        _source: Arc<T>,
+        editor: WeakEntity<Editor>,
+        mention_set: WeakEntity<MentionSet>,
+        workspace: &Entity<Workspace>,
+        cx: &mut App,
+    ) -> Vec<Completion> {
+        let commands = recent_terminal_commands(workspace, cx);
+        if commands.is_empty() {
+            return Vec::new();
+        }
+
+        let icon_path: SharedString = MentionUri::TerminalSelection {
+            line_count: 0,
+            command: None,
+            terminal_id: None,
+            scroll_line: None,
+            scroll_col: None,
+        }
+        .icon_path(cx);
+
+        commands
+            .into_iter()
+            .map(|cmd| {
+                let label = cmd.label.clone();
+                let command_name = cmd.command.clone();
+                let output = cmd.output.clone();
+
+                // The completion system will insert `new_text` into the
+                // buffer. We insert a single space as a placeholder — the
+                // confirm callback immediately replaces it with an
+                // expandable terminal crease via `insert_terminal_crease`.
+                let new_text = " ".to_string();
+
+                Completion {
+                    replace_range: source_range.clone(),
+                    new_text,
+                    label: CodeLabel::plain(label, None),
+                    documentation: None,
+                    source: project::CompletionSource::Custom,
+                    icon_path: Some(icon_path.clone()),
+                    match_start: None,
+                    snippet_deduplication_key: None,
+                    insert_text_mode: None,
+                    confirm: Some({
+                        let editor = editor.clone();
+                        let mention_set = mention_set.clone();
+                        let command_name = command_name.clone();
+                        let output = output.clone();
+                        let icon_path = icon_path.clone();
+                        Arc::new(move |_, window, cx| {
+                            let editor = editor.clone();
+                            let mention_set = mention_set.clone();
+                            let command_name = command_name.clone();
+                            let output = output.clone();
+                            let icon_path = icon_path.clone();
+                            window.defer(cx, move |window, cx| {
+                                let Some(editor) = editor.upgrade() else {
+                                    return;
+                                };
+                                crate::mention_set::insert_terminal_output_crease(
+                                    editor,
+                                    mention_set,
+                                    &output,
+                                    Some(&command_name),
+                                    None,
+                                    &icon_path,
+                                    window,
+                                    cx,
+                                );
+                            });
+                            false
+                        })
+                    }),
+                }
+            })
+            .collect()
+    }
+
     fn search_slash_commands(&self, query: String, cx: &mut App) -> Task<Vec<AvailableCommand>> {
         let commands = self.source.available_commands(cx);
         if commands.is_empty() {
@@ -891,6 +977,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
             }
 
             Some(PromptContextType::Diagnostics) => Task::ready(Vec::new()),
+            Some(PromptContextType::Terminal) => Task::ready(Vec::new()),
 
             None if query.is_empty() => {
                 let recent_task = self.recent_context_picker_entries(&workspace, cx);
@@ -1076,7 +1163,8 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                 })
             });
 
-        let has_terminal_selection = !terminal_selections_if_panel_open(workspace, cx).is_empty();
+        let has_terminal_selection =
+            !terminal_selections_if_panel_open(workspace, cx).is_empty();
 
         if has_editor_selection || has_terminal_selection {
             entries.push(PromptContextEntry::Action(
@@ -1105,6 +1193,12 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
             if summary.error_count > 0 || summary.warning_count > 0 {
                 entries.push(PromptContextEntry::Mode(PromptContextType::Diagnostics));
             }
+        }
+
+        // Show @terminal when any open terminal has recent command output
+        // from OSC 133 shell integration markers.
+        if !recent_terminal_commands(workspace, cx).is_empty() {
+            entries.push(PromptContextEntry::Mode(PromptContextType::Terminal));
         }
 
         entries
@@ -1222,6 +1316,28 @@ impl<T: PromptCompletionProviderDelegate> CompletionProvider for PromptCompletio
                         editor.clone(),
                         mention_set.clone(),
                         workspace.clone(),
+                        cx,
+                    );
+                    if !completions.is_empty() {
+                        return Task::ready(Ok(vec![CompletionResponse {
+                            completions,
+                            display_options: CompletionDisplayOptions::default(),
+                            is_incomplete: false,
+                        }]));
+                    }
+                }
+
+                if let Some(PromptContextType::Terminal) = mode {
+                    if argument.is_some() {
+                        return Task::ready(Ok(Vec::new()));
+                    }
+
+                    let completions = Self::completions_for_terminal(
+                        source_range.clone(),
+                        source.clone(),
+                        editor.clone(),
+                        mention_set.clone(),
+                        &workspace,
                         cx,
                     );
                     if !completions.is_empty() {
@@ -2030,7 +2146,10 @@ fn build_code_label_for_path(
 }
 
 /// Returns terminal selections from all terminal views if the terminal panel is open.
-fn terminal_selections_if_panel_open(workspace: &Entity<Workspace>, cx: &App) -> Vec<String> {
+fn terminal_selections_if_panel_open(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Vec<(String, Option<String>)> {
     let Some(panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
         return Vec::new();
     };
@@ -2050,7 +2169,47 @@ fn terminal_selections_if_panel_open(workspace: &Entity<Workspace>, cx: &App) ->
         return Vec::new();
     }
 
-    panel.read(cx).terminal_selections(cx)
+    panel.read(cx).terminal_selections_with_commands(cx)
+}
+
+/// A recent command and its output from a terminal with shell integration.
+pub(crate) struct RecentTerminalCommand {
+    /// The command that was run (e.g. "cargo build").
+    pub command: String,
+    /// The output text from the command.
+    pub output: String,
+    /// Display label for the completion menu (e.g. "cargo build (42 lines)").
+    pub label: String,
+}
+
+/// Collects recent command outputs from all open terminals that have OSC 133
+/// shell integration markers. Returns up to 5 most recent commands.
+fn recent_terminal_commands(
+    workspace: &Entity<Workspace>,
+    cx: &App,
+) -> Vec<RecentTerminalCommand> {
+    let Some(panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
+        return Vec::new();
+    };
+
+    panel
+        .read(cx)
+        .recent_command_outputs(5, cx)
+        .into_iter()
+        .map(|(command_name, output)| {
+            let line_count = output.lines().count();
+            let label = if line_count == 1 {
+                format!("{} (1 line)", command_name)
+            } else {
+                format!("{} ({} lines)", command_name, line_count)
+            };
+            RecentTerminalCommand {
+                command: command_name,
+                output,
+                label,
+            }
+        })
+        .collect()
 }
 
 fn selection_ranges(

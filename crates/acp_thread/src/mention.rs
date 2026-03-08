@@ -56,6 +56,22 @@ pub enum MentionUri {
     },
     TerminalSelection {
         line_count: u32,
+        /// The shell command that produced this output, if known from shell
+        /// integration markers (OSC 133). Used for display in the crease header.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// EntityId of the source terminal (as u64). Used for click-to-navigate
+        /// back to the terminal. `None` if the terminal is no longer available
+        /// or the mention was deserialized from an older format.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_id: Option<u64>,
+        /// Grid line of the selection start at copy time (alacritty Line.0).
+        /// Together with `scroll_col`, encodes the exact scroll target.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll_line: Option<i32>,
+        /// Grid column of the selection start at copy time.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scroll_col: Option<usize>,
     },
     GitDiff {
         base_ref: String,
@@ -210,7 +226,20 @@ impl MentionUri {
                         .unwrap_or_else(|| "0".to_string())
                         .parse::<u32>()
                         .unwrap_or(0);
-                    Ok(Self::TerminalSelection { line_count })
+                    let command = single_query_param(&url, "command")?;
+                    let terminal_id = single_query_param(&url, "terminal_id")?
+                        .and_then(|s| s.parse::<u64>().ok());
+                    let scroll_line = single_query_param(&url, "scroll_line")?
+                        .and_then(|s| s.parse::<i32>().ok());
+                    let scroll_col = single_query_param(&url, "scroll_col")?
+                        .and_then(|s| s.parse::<usize>().ok());
+                    Ok(Self::TerminalSelection {
+                        line_count,
+                        command,
+                        terminal_id,
+                        scroll_line,
+                        scroll_col,
+                    })
                 } else if path.starts_with("/agent/git-diff") {
                     let base_ref =
                         single_query_param(&url, "base")?.unwrap_or_else(|| "main".to_string());
@@ -237,8 +266,18 @@ impl MentionUri {
             MentionUri::TextThread { name, .. } => name.clone(),
             MentionUri::Rule { name, .. } => name.clone(),
             MentionUri::Diagnostics { .. } => "Diagnostics".to_string(),
-            MentionUri::TerminalSelection { line_count } => {
-                if *line_count == 1 {
+            MentionUri::TerminalSelection {
+                line_count,
+                command,
+                ..
+            } => {
+                if let Some(cmd) = command {
+                    if *line_count == 1 {
+                        format!("{} (1 line)", cmd)
+                    } else {
+                        format!("{} ({} lines)", cmd, line_count)
+                    }
+                } else if *line_count == 1 {
                     "Terminal (1 line)".to_string()
                 } else {
                     format!("Terminal ({} lines)", line_count)
@@ -398,10 +437,30 @@ impl MentionUri {
                 url
             }
             MentionUri::Fetch { url } => url.clone(),
-            MentionUri::TerminalSelection { line_count } => {
+            MentionUri::TerminalSelection {
+                line_count,
+                command,
+                terminal_id,
+                scroll_line,
+                scroll_col,
+            } => {
                 let mut url = Url::parse("zed:///agent/terminal-selection").unwrap();
-                url.query_pairs_mut()
-                    .append_pair("lines", &line_count.to_string());
+                {
+                    let mut pairs = url.query_pairs_mut();
+                    pairs.append_pair("lines", &line_count.to_string());
+                    if let Some(cmd) = command {
+                        pairs.append_pair("command", cmd);
+                    }
+                    if let Some(id) = terminal_id {
+                        pairs.append_pair("terminal_id", &id.to_string());
+                    }
+                    if let Some(line) = scroll_line {
+                        pairs.append_pair("scroll_line", &line.to_string());
+                    }
+                    if let Some(col) = scroll_col {
+                        pairs.append_pair("scroll_col", &col.to_string());
+                    }
+                }
                 url
             }
             MentionUri::GitDiff { base_ref } => {
@@ -719,7 +778,7 @@ mod tests {
         let terminal_uri = "zed:///agent/terminal-selection?lines=42";
         let parsed = MentionUri::parse(terminal_uri, PathStyle::local()).unwrap();
         match &parsed {
-            MentionUri::TerminalSelection { line_count } => {
+            MentionUri::TerminalSelection { line_count, .. } => {
                 assert_eq!(*line_count, 42);
             }
             _ => panic!("Expected TerminalSelection variant"),

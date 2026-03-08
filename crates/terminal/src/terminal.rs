@@ -1,4 +1,5 @@
 pub mod mappings;
+pub mod shell_integration;
 
 pub use alacritty_terminal;
 
@@ -107,6 +108,10 @@ actions!(
         ToggleViMode,
         /// Selects all text in the terminal.
         SelectAll,
+        /// Scrolls to the previous shell prompt (requires OSC 133 markers).
+        ScrollToPreviousPrompt,
+        /// Scrolls to the next shell prompt (requires OSC 133 markers).
+        ScrollToNextPrompt,
     ]
 );
 
@@ -126,6 +131,14 @@ pub fn insert_zed_terminal_env(
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
+}
+
+/// Delegates to [`shell_integration::setup`].
+pub fn setup_shell_integration(
+    shell: &Shell,
+    env: &mut HashMap<String, String>,
+) -> Vec<String> {
+    shell_integration::setup(shell, env)
 }
 
 ///Upward flowing events, for changing the title and such
@@ -401,6 +414,7 @@ impl TerminalBuilder {
             #[cfg(windows)]
             shell_program: None,
             activation_script: Vec::new(),
+            last_copy_snapshot: None,
             template: CopyTemplate {
                 shell: Shell::System,
                 env: HashMap::default(),
@@ -634,6 +648,7 @@ impl TerminalBuilder {
                 #[cfg(windows)]
                 shell_program,
                 activation_script: activation_script.clone(),
+                last_copy_snapshot: None,
                 template: CopyTemplate {
                     shell,
                     env,
@@ -784,6 +799,46 @@ impl Deref for IndexedCell {
     }
 }
 
+/// Clipboard metadata attached to terminal copies so the agent panel paste
+/// handler can distinguish terminal content from plain text and create a
+/// crease instead of pasting literally.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TerminalClipboardMetadata {
+    /// The shell command that produced this output, if known from shell
+    /// integration markers (OSC 133).
+    pub command: Option<String>,
+    /// EntityId of the source terminal (as u64), for click-to-navigate.
+    pub terminal_id: Option<u64>,
+    /// Grid line of the selection start (alacritty Line.0).
+    pub scroll_line: Option<i32>,
+    /// Grid column of the selection start.
+    pub scroll_col: Option<usize>,
+}
+
+/// Snapshot of terminal content captured at copy time. Stores the text and
+/// the grid coordinates needed to navigate back to the source location.
+///
+/// Because terminal scrollback is mutable (new output evicts old lines), we
+/// snapshot everything we need when the mention is created rather than trying
+/// to read it later.
+#[derive(Debug, Clone)]
+pub struct TerminalMentionSnapshot {
+    /// Plain text content that was selected/copied.
+    pub text: String,
+
+    /// The grid cells that were selected, preserving ANSI attributes (colors,
+    /// bold, etc.) for rich rendering in creases.
+    pub cells: Vec<IndexedCell>,
+
+    /// The top-left point of the selection in the terminal grid at copy time.
+    /// Used to scroll the terminal back to this position on click.
+    pub scroll_top: AlacPoint,
+
+    /// The command that produced this output, if known from shell integration
+    /// markers (OSC 133). `None` when markers are unavailable.
+    pub command: Option<String>,
+}
+
 // TODO: Un-pub
 #[derive(Clone)]
 pub struct TerminalContent {
@@ -870,6 +925,10 @@ pub struct Terminal {
     shell_program: Option<String>,
     template: CopyTemplate,
     activation_script: Vec<String>,
+    /// The most recent copy snapshot, captured when the user copies from this
+    /// terminal. Used by the agent panel paste handler to create rich terminal
+    /// mentions with navigation back to the source location.
+    pub last_copy_snapshot: Option<TerminalMentionSnapshot>,
     child_exited: Option<ExitStatus>,
     event_loop_task: Task<Result<(), anyhow::Error>>,
     background_executor: BackgroundExecutor,
@@ -981,7 +1040,12 @@ impl Terminal {
             AlacTermEvent::Wakeup => {
                 cx.emit(Event::Wakeup);
 
-                if let TerminalType::Pty { info, .. } = &self.terminal_type {
+                let mark_count = self.term.lock().semantic_marks().len();
+                if mark_count > 0 {
+                    log::info!("Terminal wakeup: {mark_count} semantic marks");
+                }
+
+                if let Some(info) = self.terminal_type.process_info() {
                     info.emit_title_changed_if_changed(cx);
                 }
             }
@@ -1150,7 +1214,83 @@ impl Terminal {
             InternalEvent::Copy(keep_selection) => {
                 trace!("Copying selection: keep_selection={keep_selection:?}");
                 if let Some(txt) = term.selection_to_string() {
-                    cx.write_to_clipboard(ClipboardItem::new_string(txt));
+                    // Capture a snapshot of the selected cells and scroll
+                    // position before writing to clipboard, so the agent panel
+                    // can create a rich terminal mention on paste.
+                    let snapshot = if let Some(selection_range) =
+                        term.selection.as_ref().and_then(|s| s.to_range(term))
+                    {
+                        let start = selection_range.start;
+                        let end = selection_range.end;
+                        let mut cells = Vec::new();
+                        for line in (start.line.0..=end.line.0).map(Line::from) {
+                            let grid_line = &term.grid()[line];
+                            let start_col =
+                                if line == start.line { start.column } else { Column(0) };
+                            let end_col = if line == end.line {
+                                end.column
+                            } else {
+                                Column(term.grid().columns().saturating_sub(1))
+                            };
+                            for col in (start_col.0..=end_col.0).map(Column::from) {
+                                cells.push(IndexedCell {
+                                    point: AlacPoint::new(line, col),
+                                    cell: grid_line[col].clone(),
+                                });
+                            }
+                        }
+                        // Try to resolve the command name from shell
+                        // integration markers. If the selection start falls
+                        // within (or after) an output zone, use the command
+                        // that produced that output.
+                        let command = term
+                            .semantic_zones()
+                            .iter()
+                            .rev()
+                            .find(|zone| {
+                                zone.zone_type
+                                    == alacritty_terminal::SemanticZoneType::Output
+                                    && zone.start <= start
+                            })
+                            .and_then(|output_zone| {
+                                term.command_for_output(output_zone)
+                            });
+
+                        if let Some(cmd) = &command {
+                            log::info!(
+                                "Terminal copy: resolved command {:?} from semantic zones",
+                                cmd
+                            );
+                        } else {
+                            let zone_count = term.semantic_zones().len();
+                            let mark_count = term.semantic_marks().len();
+                            log::info!(
+                                "Terminal copy: no command resolved ({mark_count} marks, {zone_count} zones)"
+                            );
+                        }
+
+                        Some(TerminalMentionSnapshot {
+                            text: txt.clone(),
+                            cells,
+                            scroll_top: start,
+                            command,
+                        })
+                    } else {
+                        None
+                    };
+
+                    let metadata = TerminalClipboardMetadata {
+                        command: snapshot
+                            .as_ref()
+                            .and_then(|s| s.command.clone()),
+                        terminal_id: Some(cx.entity_id().as_u64()),
+                        scroll_line: snapshot.as_ref().map(|s| s.scroll_top.line.0),
+                        scroll_col: snapshot.as_ref().map(|s| s.scroll_top.column.0),
+                    };
+                    self.last_copy_snapshot = snapshot;
+                    cx.write_to_clipboard(
+                        ClipboardItem::new_string_with_json_metadata(txt, metadata),
+                    );
                     if !keep_selection.unwrap_or_else(|| {
                         let settings = TerminalSettings::get_global(cx);
                         settings.keep_selection_on_copy
@@ -1284,6 +1424,98 @@ impl Terminal {
         &self.last_content
     }
 
+    /// Returns recent command outputs from OSC 133 shell integration zones.
+    ///
+    /// Each entry is `(command_name, output_text)`. Returns up to `limit`
+    /// most recent commands, newest first.
+    pub fn recent_command_outputs(&self, limit: usize) -> Vec<(String, String)> {
+        let term = self.term.lock();
+        let marks = term.semantic_marks();
+        let zones = term.semantic_zones();
+
+        log::info!(
+            "recent_command_outputs: {} marks, {} zones, limit={}",
+            marks.len(),
+            zones.len(),
+            limit,
+        );
+        for (i, zone) in zones.iter().enumerate() {
+            log::info!(
+                "  zone[{}]: {:?} start=({},{}) end=({},{})",
+                i,
+                zone.zone_type,
+                zone.start.line.0,
+                zone.start.column.0,
+                zone.end.line.0,
+                zone.end.column.0,
+            );
+        }
+
+        let mut results = Vec::new();
+
+        for zone in zones.iter().rev() {
+            if zone.zone_type != alacritty_terminal::SemanticZoneType::Output {
+                continue;
+            }
+            let output = term.bounds_to_string(zone.start, zone.end);
+            let trimmed = output.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Try to resolve the command name. `command_for_output` looks for
+            // an Input (B→C) zone. If B is missing, fall back to extracting
+            // the last line of the preceding Prompt (A→next) zone — that's
+            // typically "prompt_text command args", so take the last line and
+            // strip common prompt prefixes.
+            let command_name = term
+                .command_for_output(zone)
+                .or_else(|| {
+                    let output_index = zones.iter().position(|z| z == zone)?;
+                    if output_index == 0 {
+                        return None;
+                    }
+                    let preceding = &zones[output_index - 1];
+                    if preceding.zone_type != alacritty_terminal::SemanticZoneType::Prompt {
+                        return None;
+                    }
+                    let prompt_text = term.bounds_to_string(preceding.start, preceding.end);
+                    let last_line = prompt_text.lines().last()?.trim();
+                    if last_line.is_empty() {
+                        return None;
+                    }
+                    // Strip common prompt suffixes like "$ ", "> ", "% "
+                    let command = last_line
+                        .rsplit_once("$ ")
+                        .or_else(|| last_line.rsplit_once("> "))
+                        .or_else(|| last_line.rsplit_once("% "))
+                        .map(|(_, cmd)| cmd)
+                        .unwrap_or(last_line);
+                    let trimmed_cmd = command.trim();
+                    if trimmed_cmd.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed_cmd.to_string())
+                    }
+                })
+                .unwrap_or_else(|| "terminal".to_string());
+
+            log::info!(
+                "  -> output zone: command={:?}, output_lines={}",
+                command_name,
+                trimmed.lines().count(),
+            );
+
+            results.push((command_name, trimmed.to_string()));
+
+            if results.len() >= limit {
+                break;
+            }
+        }
+
+        results
+    }
+
     pub fn set_cursor_shape(&mut self, cursor_shape: CursorShape) {
         self.term_config.default_cursor_style = cursor_shape.into();
         self.term.lock().set_options(self.term_config.clone());
@@ -1409,6 +1641,98 @@ impl Terminal {
     pub fn scroll_page_down(&mut self) {
         self.events
             .push_back(InternalEvent::Scroll(AlacScroll::PageDown));
+    }
+
+    pub fn scroll_to_point(&mut self, point: AlacPoint) {
+        self.events
+            .push_back(InternalEvent::ScrollToAlacPoint(point));
+    }
+
+    /// Scroll up to the previous shell prompt.
+    ///
+    /// Collects all PromptStart marks, finds the one currently nearest the
+    /// viewport top, then scrolls to the one before it. Uses `Scroll::Delta`
+    /// to force the target line to the top of the viewport even if it's
+    /// already visible.
+    /// Returns the `Line` of the prompt scrolled to, if any.
+    pub fn scroll_to_previous_prompt(&mut self) -> Option<Line> {
+        let term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let viewport_top = Line(-display_offset);
+
+        let prompt_points: Vec<AlacPoint> = term
+            .semantic_marks()
+            .iter()
+            .filter(|m| m.mark_type == alacritty_terminal::SemanticMarkType::PromptStart)
+            .map(|m| m.point)
+            .collect();
+        drop(term);
+
+        if prompt_points.is_empty() {
+            self.events
+                .push_back(InternalEvent::Scroll(AlacScroll::Top));
+            return None;
+        }
+
+        let target = prompt_points
+            .iter()
+            .rev()
+            .find(|p| p.line < viewport_top)
+            .copied();
+
+        match target {
+            Some(point) => {
+                let delta = viewport_top.0 - point.line.0;
+                self.events
+                    .push_back(InternalEvent::Scroll(AlacScroll::Delta(delta)));
+                Some(point.line)
+            }
+            None => {
+                self.events
+                    .push_back(InternalEvent::Scroll(AlacScroll::Top));
+                prompt_points.first().map(|p| p.line)
+            }
+        }
+    }
+
+    /// Returns the `Line` of the prompt scrolled to, if any.
+    pub fn scroll_to_next_prompt(&mut self) -> Option<Line> {
+        let term = self.term.lock();
+        let display_offset = term.grid().display_offset() as i32;
+        let viewport_top = Line(-display_offset);
+
+        let prompt_points: Vec<AlacPoint> = term
+            .semantic_marks()
+            .iter()
+            .filter(|m| m.mark_type == alacritty_terminal::SemanticMarkType::PromptStart)
+            .map(|m| m.point)
+            .collect();
+        drop(term);
+
+        if prompt_points.is_empty() {
+            self.events
+                .push_back(InternalEvent::Scroll(AlacScroll::Bottom));
+            return None;
+        }
+
+        let target = prompt_points
+            .iter()
+            .find(|p| p.line > viewport_top)
+            .copied();
+
+        match target {
+            Some(point) => {
+                let delta = viewport_top.0 - point.line.0;
+                self.events
+                    .push_back(InternalEvent::Scroll(AlacScroll::Delta(delta)));
+                Some(point.line)
+            }
+            None => {
+                self.events
+                    .push_back(InternalEvent::Scroll(AlacScroll::Bottom));
+                None
+            }
+        }
     }
 
     pub fn scroll_to_top(&mut self) {

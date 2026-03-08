@@ -32,8 +32,9 @@ use std::{
 use task::TaskId;
 use terminal::{
     Clear, Copy, Event, HoveredWord, MaybeNavigationTarget, Paste, ScrollLineDown, ScrollLineUp,
-    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToTop, ShowCharacterPalette, TaskState,
-    TaskStatus, Terminal, TerminalBounds, ToggleViMode,
+    ScrollPageDown, ScrollPageUp, ScrollToBottom, ScrollToNextPrompt, ScrollToPreviousPrompt,
+    ScrollToTop, ShowCharacterPalette, TaskState, TaskStatus, Terminal, TerminalBounds,
+    ToggleViMode,
     alacritty_terminal::{
         index::Point as AlacPoint,
         term::{TermMode, point_to_viewport, search::RegexSearch},
@@ -147,6 +148,9 @@ pub struct TerminalView {
     self_handle: WeakEntity<Self>,
     rename_editor: Option<Entity<Editor>>,
     rename_editor_subscription: Option<Subscription>,
+    /// Grid line that should be briefly highlighted after prompt navigation.
+    /// Stores the alacritty grid line and the instant the flash started.
+    pub prompt_flash: Option<(terminal::alacritty_terminal::index::Line, std::time::Instant)>,
     _subscriptions: Vec<Subscription>,
     _terminal_subscriptions: Vec<Subscription>,
 }
@@ -293,6 +297,7 @@ impl TerminalView {
             self_handle: cx.entity().downgrade(),
             rename_editor: None,
             rename_editor_subscription: None,
+            prompt_flash: None,
             _subscriptions: subscriptions,
             _terminal_subscriptions: terminal_subscriptions,
         }
@@ -737,6 +742,28 @@ impl TerminalView {
 
     fn scroll_to_top(&mut self, _: &ScrollToTop, _: &mut Window, cx: &mut Context<Self>) {
         self.terminal.update(cx, |term, _| term.scroll_to_top());
+        cx.notify();
+    }
+
+    fn scroll_to_previous_prompt(
+        &mut self,
+        _: &ScrollToPreviousPrompt,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal
+            .update(cx, |term, _| term.scroll_to_previous_prompt());
+        cx.notify();
+    }
+
+    fn scroll_to_next_prompt(
+        &mut self,
+        _: &ScrollToNextPrompt,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.terminal
+            .update(cx, |term, _| term.scroll_to_next_prompt());
         cx.notify();
     }
 
@@ -1231,6 +1258,8 @@ impl Render for TerminalView {
             .on_action(cx.listener(TerminalView::scroll_page_down))
             .on_action(cx.listener(TerminalView::scroll_to_top))
             .on_action(cx.listener(TerminalView::scroll_to_bottom))
+            .on_action(cx.listener(TerminalView::scroll_to_previous_prompt))
+            .on_action(cx.listener(TerminalView::scroll_to_next_prompt))
             .on_action(cx.listener(TerminalView::toggle_vi_mode))
             .on_action(cx.listener(TerminalView::show_character_palette))
             .on_action(cx.listener(TerminalView::select_all))
