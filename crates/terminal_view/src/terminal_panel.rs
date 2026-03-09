@@ -1131,9 +1131,9 @@ impl TerminalPanel {
     }
 
     /// Returns recent command outputs from all terminals that have OSC 133
-    /// shell integration markers. Each entry is `(command_name, output_text)`.
+    /// shell integration markers. Each entry is `(command_name, prompt_text, output_text)`.
     /// Returns up to `limit` most recent commands across all terminals.
-    pub fn recent_command_outputs(&self, limit: usize, cx: &App) -> Vec<(String, String)> {
+    pub fn recent_command_outputs(&self, limit: usize, cx: &App) -> Vec<(String, String, String)> {
         let mut results = Vec::new();
         for pane in self.center.panes() {
             for item in pane.read(cx).items() {

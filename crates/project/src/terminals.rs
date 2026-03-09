@@ -401,55 +401,23 @@ impl Project {
 
             // Set up shell integration (ZDOTDIR for zsh, XDG_DATA_DIRS for
             // fish, --rcfile for bash) so the shell emits OSC 133 markers.
-            // This must happen before the env is cloned for either path.
-            let shell_integration_args =
-                terminal::setup_shell_integration(&task_shell, &mut env);
+            terminal::setup_shell_integration(&task_shell, &mut env);
 
-            // Decide whether to use pty-host (local interactive shells) or
-            // direct PTY allocation (remote shells, tasks).
-            let use_pty_host = !is_via_remote && cfg!(unix);
-            let (terminal_builder, snapshot_data) = if use_pty_host {
-                // Spawn a pty-host session for local interactive terminals.
-                let session_id = uuid::Uuid::new_v4();
-                let env_for_host = env.clone();
-
-                let shell_integration_args_for_host = shell_integration_args.clone();
-                let (shell_program, shell_args) = project.update(cx, move |_, cx| {
-                    let shell = match remote_client {
-                        Some(remote_client) => {
-                            create_remote_shell(None, env.clone(), path.clone(), remote_client, cx)?.0
+            let builder = project
+                .update(cx, move |_, cx| {
+                    let (shell, env) = {
+                        match remote_client {
+                            Some(remote_client) => {
+                                create_remote_shell(None, env, path, remote_client, cx)?
+                            }
+                            None => (settings.shell, env),
                         }
                     };
-                    let (program, mut args) = match shell {
-                        task::Shell::System => (None, vec![]),
-                        task::Shell::Program(p) => (Some(p), vec![]),
-                        task::Shell::WithArguments { program, args, .. } => (Some(program), args),
-                    };
-                    // Append shell integration args (e.g. --rcfile for bash).
-                    args.extend(shell_integration_args_for_host);
-                    anyhow::Ok((program, args))
-                })??;
-
-                let mut host_env = env_for_host;
-                terminal::insert_zed_terminal_env(&mut host_env, &"0.0.0");
-
-                let socket_path = pty_host::spawn_host(&pty_host::SpawnConfig {
-                    session_id,
-                    shell_program,
-                    shell_args,
-                    working_directory: local_path.as_deref().map(|p| p.to_path_buf()),
-                    env: host_env.into_iter().collect(),
-                })?;
-
-                log::info!(
-                    "create_terminal_shell: connecting to pty-host session {session_id} \
-                     at {}",
-                    socket_path.display()
-                );
-                project.update(cx, move |_, cx| {
-                    TerminalBuilder::from_pty_host(
-                        session_id,
-                        &socket_path,
+                    anyhow::Ok(TerminalBuilder::new(
+                        local_path.map(|path| path.to_path_buf()),
+                        None,
+                        shell,
+                        env,
                         settings.cursor_shape,
                         settings.alternate_scroll,
                         settings.max_scroll_history_lines,

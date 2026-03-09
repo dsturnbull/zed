@@ -814,13 +814,13 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
             .map(|cmd| {
                 let label = cmd.label.clone();
                 let command_name = cmd.command.clone();
+                let prompt = cmd.prompt.clone();
                 let output = cmd.output.clone();
 
-                // The completion system will insert `new_text` into the
-                // buffer. We insert a single space as a placeholder — the
-                // confirm callback immediately replaces it with an
-                // expandable terminal crease via `insert_terminal_crease`.
-                let new_text = " ".to_string();
+                // Empty new_text: the completion system replaces the
+                // trigger text with this, then our confirm callback inserts
+                // the crease. No placeholder needed.
+                let new_text = String::new();
 
                 Completion {
                     replace_range: source_range.clone(),
@@ -836,12 +836,14 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                         let editor = editor.clone();
                         let mention_set = mention_set.clone();
                         let command_name = command_name.clone();
+                        let prompt = prompt.clone();
                         let output = output.clone();
                         let icon_path = icon_path.clone();
                         Arc::new(move |_, window, cx| {
                             let editor = editor.clone();
                             let mention_set = mention_set.clone();
                             let command_name = command_name.clone();
+                            let prompt = prompt.clone();
                             let output = output.clone();
                             let icon_path = icon_path.clone();
                             window.defer(cx, move |window, cx| {
@@ -853,6 +855,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                                     mention_set,
                                     &output,
                                     Some(&command_name),
+                                    if prompt.is_empty() { None } else { Some(&prompt) },
                                     None,
                                     &icon_path,
                                     window,
@@ -2176,6 +2179,9 @@ fn terminal_selections_if_panel_open(
 pub(crate) struct RecentTerminalCommand {
     /// The command that was run (e.g. "cargo build").
     pub command: String,
+    /// The prompt line including the command (e.g. "user@host ~/proj % cargo build").
+    /// Empty if the prompt zone was not available.
+    pub prompt: String,
     /// The output text from the command.
     pub output: String,
     /// Display label for the completion menu (e.g. "cargo build (42 lines)").
@@ -2196,7 +2202,7 @@ fn recent_terminal_commands(
         .read(cx)
         .recent_command_outputs(5, cx)
         .into_iter()
-        .map(|(command_name, output)| {
+        .map(|(command_name, prompt, output)| {
             let line_count = output.lines().count();
             let label = if line_count == 1 {
                 format!("{} (1 line)", command_name)
@@ -2205,6 +2211,7 @@ fn recent_terminal_commands(
             };
             RecentTerminalCommand {
                 command: command_name,
+                prompt,
                 output,
                 label,
             }

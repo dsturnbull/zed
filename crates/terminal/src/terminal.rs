@@ -1,5 +1,6 @@
 pub mod mappings;
 pub mod shell_integration;
+mod osc133_tests;
 
 pub use alacritty_terminal;
 
@@ -1042,10 +1043,10 @@ impl Terminal {
 
                 let mark_count = self.term.lock().semantic_marks().len();
                 if mark_count > 0 {
-                    log::info!("Terminal wakeup: {mark_count} semantic marks");
+                    log::trace!("Terminal wakeup: {mark_count} semantic marks");
                 }
 
-                if let Some(info) = self.terminal_type.process_info() {
+                if let TerminalType::Pty { info, .. } = &self.terminal_type {
                     info.emit_title_changed_if_changed(cx);
                 }
             }
@@ -1257,14 +1258,14 @@ impl Terminal {
                             });
 
                         if let Some(cmd) = &command {
-                            log::info!(
+                            log::trace!(
                                 "Terminal copy: resolved command {:?} from semantic zones",
                                 cmd
                             );
                         } else {
                             let zone_count = term.semantic_zones().len();
                             let mark_count = term.semantic_marks().len();
-                            log::info!(
+                            log::trace!(
                                 "Terminal copy: no command resolved ({mark_count} marks, {zone_count} zones)"
                             );
                         }
@@ -1426,21 +1427,23 @@ impl Terminal {
 
     /// Returns recent command outputs from OSC 133 shell integration zones.
     ///
-    /// Each entry is `(command_name, output_text)`. Returns up to `limit`
-    /// most recent commands, newest first.
-    pub fn recent_command_outputs(&self, limit: usize) -> Vec<(String, String)> {
+    /// Each entry is `(command_name, prompt_text, output_text)`. Returns up to
+    /// `limit` most recent commands, newest first. The prompt text is the
+    /// content of the A→B zone (the shell prompt line including the command
+    /// the user typed), giving context like working directory.
+    pub fn recent_command_outputs(&self, limit: usize) -> Vec<(String, String, String)> {
         let term = self.term.lock();
         let marks = term.semantic_marks();
         let zones = term.semantic_zones();
 
-        log::info!(
+        log::trace!(
             "recent_command_outputs: {} marks, {} zones, limit={}",
             marks.len(),
             zones.len(),
             limit,
         );
         for (i, zone) in zones.iter().enumerate() {
-            log::info!(
+            log::trace!(
                 "  zone[{}]: {:?} start=({},{}) end=({},{})",
                 i,
                 zone.zone_type,
@@ -1463,11 +1466,10 @@ impl Terminal {
                 continue;
             }
 
-            // Try to resolve the command name. `command_for_output` looks for
-            // an Input (B→C) zone. If B is missing, fall back to extracting
-            // the last line of the preceding Prompt (A→next) zone — that's
-            // typically "prompt_text command args", so take the last line and
-            // strip common prompt prefixes.
+            // Resolve the command name using the original approach:
+            // `command_for_output` looks for an Input (B→C) zone preceding
+            // this Output zone. If that fails, fall back to extracting the
+            // command from the preceding Prompt zone's last line.
             let command_name = term
                 .command_for_output(zone)
                 .or_else(|| {
@@ -1484,7 +1486,6 @@ impl Terminal {
                     if last_line.is_empty() {
                         return None;
                     }
-                    // Strip common prompt suffixes like "$ ", "> ", "% "
                     let command = last_line
                         .rsplit_once("$ ")
                         .or_else(|| last_line.rsplit_once("> "))
@@ -1500,13 +1501,52 @@ impl Terminal {
                 })
                 .unwrap_or_else(|| "terminal".to_string());
 
-            log::info!(
-                "  -> output zone: command={:?}, output_lines={}",
+            // Try to extract the prompt text (A→B zone) for context.
+            // Walk backwards from the Output zone to find Prompt and Input
+            // zones. If present, combine them into the full prompt line the
+            // user saw, e.g. "user@host ~/proj % ls -la".
+            let prompt_text = (|| -> Option<String> {
+                let output_index = zones.iter().position(|z| z == zone)?;
+                if output_index == 0 {
+                    return None;
+                }
+                let preceding = &zones[output_index - 1];
+                if preceding.zone_type == alacritty_terminal::SemanticZoneType::Input {
+                    // Input zone found — Prompt zone is one further back.
+                    let input_text = term.bounds_to_string(preceding.start, preceding.end);
+                    let input_trimmed = input_text.trim();
+                    if output_index >= 2 {
+                        let prompt_zone = &zones[output_index - 2];
+                        if prompt_zone.zone_type == alacritty_terminal::SemanticZoneType::Prompt {
+                            let p = term.bounds_to_string(prompt_zone.start, prompt_zone.end);
+                            let p_trimmed = p.trim();
+                            if !p_trimmed.is_empty() {
+                                if !input_trimmed.is_empty() {
+                                    return Some(format!("{} {}", p_trimmed, input_trimmed));
+                                }
+                                return Some(p_trimmed.to_string());
+                            }
+                        }
+                    }
+                } else if preceding.zone_type == alacritty_terminal::SemanticZoneType::Prompt {
+                    let p = term.bounds_to_string(preceding.start, preceding.end);
+                    let last_line = p.lines().last().unwrap_or("").trim();
+                    if !last_line.is_empty() {
+                        return Some(last_line.to_string());
+                    }
+                }
+                None
+            })()
+            .unwrap_or_default();
+
+            log::trace!(
+                "  -> output zone: command={:?}, prompt={:?}, output_lines={}",
                 command_name,
+                prompt_text,
                 trimmed.lines().count(),
             );
 
-            results.push((command_name, trimmed.to_string()));
+            results.push((command_name, prompt_text, trimmed.to_string()));
 
             if results.len() >= limit {
                 break;

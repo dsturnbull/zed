@@ -1056,6 +1056,7 @@ impl MessageEditor {
             self.mention_set.downgrade(),
             &text,
             command.as_deref(),
+            None,
             terminal_id,
             &icon_path,
             window,

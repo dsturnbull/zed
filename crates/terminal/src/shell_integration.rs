@@ -109,7 +109,8 @@ fn write_script(subdir: &str, filename: &str, content: &str) -> Option<PathBuf> 
 
 fn hooks_for_shell(shell_name: &str) -> Option<&'static str> {
     match shell_name {
-        "zsh" | "bash" => Some(BASH_ZSH_OSC133_HOOKS),
+        "zsh" => Some(ZSH_OSC133_HOOKS),
+        "bash" => Some(BASH_OSC133_HOOKS),
         "fish" => Some(FISH_OSC133_HOOKS),
         _ => None,
     }
@@ -217,65 +218,150 @@ fn setup_fish(env: &mut HashMap<String, String>) -> Vec<String> {
 // Hook scripts
 // ---------------------------------------------------------------------------
 
-/// Shell integration for OSC 133 semantic zones (bash + zsh).
+/// Zsh shell integration for OSC 133 semantic zones.
 ///
-/// Adapted from wezterm's shell-integration script which uses standard
-/// OSC 133 sequences that work with any terminal. The script handles both
-/// bash and zsh in a single file.
+/// Uses ghostty's pattern-match-and-strip strategy for PS1:
+///   - precmd: emit D (if a command ran), then add A and B marks to PS1
+///     using pattern matching (`[[ $PS1 == *$mark* ]]`) to prevent
+///     double-insertion.
+///   - preexec: strip all marks from PS1/PS2 via pattern substitution
+///     (`PS1=${PS1//$mark}`), then emit C.
 ///
-/// Source: <https://github.com/wezterm/wezterm/blob/main/assets/shell-integration/wezterm.sh>
-/// License: MIT
+/// This gives us:
+///   - No accumulation: pattern matching prevents double-wrapping regardless
+///     of what other plugins do to PS1.
+///   - Redraw survival: marks are embedded in PS1, so they're re-emitted on
+///     window resize (SIGWINCH), `zle reset-prompt` (async plugins like
+///     powerlevel10k/pure), and SIGCHLD with `notify` set.
+///   - Plugin-safe: stripping in preexec is unconditional — no equality check
+///     against a saved PS1 copy, so immune to PS1 changes by other hooks.
+///   - Double-source safe: guard prevents duplicate hook registration.
 ///
 /// The semantic zone sequences are:
-///   A — prompt start (fresh line)
-///   B — end of prompt, start of user input
-///   C — end of user input, start of command output
-///   D — end of command output (with exit status)
-///
-/// The precmd hook wraps PS1 with A at the start and B at the end,
-/// restoring the original PS1 in preexec to avoid accumulation.
-const BASH_ZSH_OSC133_HOOKS: &str = r#"
-if [ -z "${BASH_VERSION-}" -a -z "${ZSH_NAME-}" ] ; then
+///   A — prompt start
+///   B — end of prompt / start of user input
+///   C — end of user input / start of command output
+///   D — end of command output with exit status
+const ZSH_OSC133_HOOKS: &str = r#"
+if [[ -z "$ZSH_NAME" ]] ; then
   return 0 2>/dev/null || true
 fi
 if [[ $- != *i* ]] ; then
   return 0 2>/dev/null || true
 fi
+if [[ -n "$__ZED_OSC133_INSTALLED" ]] ; then
+  return 0
+fi
+__ZED_OSC133_INSTALLED=1
 
-__zed_semantic_precmd_executing=""
+# 0: no marks written yet
+# 1: last C not yet closed with D
+# 2: normal (D has been written or no command has run)
+typeset -gi __zed_semantic_state=0
+
 __zed_semantic_precmd() {
-  local ret="$?"
-  if [[ "$__zed_semantic_precmd_executing" != "0" ]] ; then
-    __zed_save_ps1="$PS1"
-    __zed_save_ps2="$PS2"
-    if [[ -n "$ZSH_NAME" ]] ; then
-      PS1=$'%{\e]133;A\a%}'$PS1$'%{\e]133;B\a%}'
-      PS2=$'%{\e]133;A;k=s\a%}'$PS2$'%{\e]133;B\a%}'
-    else
-      PS1='\[\e]133;A\a\]'$PS1'\[\e]133;B\a\]'
-      PS2='\[\e]133;A;k=s\a\]'$PS2'\[\e]133;B\a\]'
+  local -i ret=$?
+  builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+
+  if ! builtin zle 2>/dev/null; then
+    if (( __zed_semantic_state == 1 )); then
+      builtin printf '\e]133;D;%s\a' $ret
+      (( __zed_semantic_state = 2 ))
+    elif (( __zed_semantic_state == 2 )); then
+      builtin printf '\e]133;D\a'
     fi
-    __zed_check_ps1="$PS1"
   fi
-  if [[ "$__zed_semantic_precmd_executing" != "" ]] ; then
-    printf "\033]133;D;%s\007" "$ret"
+
+  local mark_a=$'%{\e]133;A\a%}'
+  local mark_b=$'%{\e]133;B\a%}'
+
+  if [[ -o prompt_percent ]]; then
+    [[ $PS1 == *$mark_a* ]] || PS1=${mark_a}${PS1}
+    [[ $PS1 == *$mark_b* ]] || PS1=${PS1}${mark_b}
+
+    local mark_a_secondary=$'%{\e]133;A;k=s\a%}'
+    if [[ $PS1 == ${mark_a}$'\n'* ]]; then
+      local rest=${PS1#${mark_a}$'\n'}
+      if [[ $rest == *$'\n'* ]]; then
+        PS1=${mark_a}$'\n'${rest//$'\n'/$'\n'${mark_a_secondary}}
+      fi
+    elif [[ $PS1 == *$'\n'* ]]; then
+      PS1=${PS1//$'\n'/$'\n'${mark_a_secondary}}
+    fi
+
+    [[ $PS2 == *$mark_a_secondary* ]] || PS2=${mark_a_secondary}${PS2}
+    [[ $PS2 == *$mark_b* ]] || PS2=${PS2}${mark_b}
+
+    (( __zed_semantic_state = 2 ))
+  elif ! builtin zle 2>/dev/null; then
+    builtin printf '\e]133;A\a'
+    (( __zed_semantic_state = 2 ))
   fi
-  printf "\033]133;A\007"
-  __zed_semantic_precmd_executing=0
 }
 
 __zed_semantic_preexec() {
-  if [[ -n "${__zed_save_ps1+1}" && "${__zed_check_ps1-}" == "${PS1}" ]]; then
-    PS1="$__zed_save_ps1"
-    PS2="$__zed_save_ps2"
-    unset __zed_save_ps1
-  fi
-  printf "\033]133;C;\007"
-  __zed_semantic_precmd_executing=1
+  builtin emulate -L zsh -o no_warn_create_global -o no_aliases
+
+  PS1=${PS1//$'%{\e]133;A\a%}'}
+  PS1=${PS1//$'%{\e]133;A;k=s\a%}'}
+  PS1=${PS1//$'%{\e]133;B\a%}'}
+  PS2=${PS2//$'%{\e]133;A;k=s\a%}'}
+  PS2=${PS2//$'%{\e]133;B\a%}'}
+
+  builtin printf '\e]133;C\a'
+  (( __zed_semantic_state = 1 ))
 }
 
 precmd_functions+=(__zed_semantic_precmd)
 preexec_functions+=(__zed_semantic_preexec)
+"#;
+
+/// Bash shell integration for OSC 133 semantic zones.
+///
+/// Uses PROMPT_COMMAND for A/D marks, PS1 suffix for B, and PS0 for C
+/// (bash 4.4+, falls back to DEBUG trap for older bash).
+///
+/// PS1 wrapping is still needed for bash (no zle-line-init equivalent),
+/// but we only append B — never embed A — and use a sentinel to prevent
+/// accumulation.
+const BASH_OSC133_HOOKS: &str = r#"
+if [[ -z "${BASH_VERSION-}" ]] ; then
+  return 0 2>/dev/null || true
+fi
+if [[ $- != *i* ]] ; then
+  return 0 2>/dev/null || true
+fi
+if [[ -n "$__ZED_OSC133_INSTALLED" ]] ; then
+  return 0
+fi
+__ZED_OSC133_INSTALLED=1
+
+__zed_semantic_prompt_command() {
+  local ret="$?"
+  if [[ -n "$__zed_semantic_executing" ]] ; then
+    printf "\033]133;D;%s\007" "$ret"
+  fi
+  printf "\033]133;A\007"
+  # Append B to PS1 only if our sentinel is not already present.
+  if [[ "$PS1" != *$'\e]133;B\a'* ]] ; then
+    PS1="$PS1"'\[\e]133;B\a\]'
+  fi
+  __zed_semantic_executing=""
+}
+
+# Use PS0 (bash 4.4+) to emit C after user input, before command runs.
+if [[ "${BASH_VERSINFO[0]}" -ge 5 ]] || \
+   [[ "${BASH_VERSINFO[0]}" -eq 4 && "${BASH_VERSINFO[1]}" -ge 4 ]] ; then
+  PS0='\[\e]133;C\a\]'
+  __zed_semantic_preexec_via_debug() {
+    __zed_semantic_executing=1
+  }
+  trap '__zed_semantic_preexec_via_debug' DEBUG
+else
+  trap 'printf "\033]133;C\007"; __zed_semantic_executing=1' DEBUG
+fi
+
+PROMPT_COMMAND="__zed_semantic_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 "#;
 
 /// Fish shell integration for OSC 133 semantic zones.

@@ -1230,6 +1230,7 @@ pub(crate) fn insert_terminal_output_crease(
     mention_set: WeakEntity<MentionSet>,
     output: &str,
     command: Option<&str>,
+    prompt: Option<&str>,
     terminal_id: Option<u64>,
     icon_path: &SharedString,
     window: &mut Window,
@@ -1248,7 +1249,11 @@ pub(crate) fn insert_terminal_output_crease(
         scroll_col: None,
     };
 
-    let formatted_text = format!("```console\n{}\n```", output);
+    let formatted_text = if let Some(prompt) = prompt.filter(|p| !p.is_empty()) {
+        format!("```console\n$ {}\n{}\n```", prompt, output)
+    } else {
+        format!("```console\n{}\n```", output)
+    };
     let crease_label: SharedString = mention_uri.name().into();
     let editor_weak = editor.downgrade();
     let icon_path = icon_path.clone();
