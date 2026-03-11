@@ -38,6 +38,7 @@ dependencies = [
  "telemetry",
  "terminal",
  "text",
+ "time",
  "ui",
  "url",
  "urlencoding",
@@ -213,6 +214,7 @@ dependencies = [
  "text",
  "theme",
  "thiserror 2.0.17",
+ "time",
  "ui",
  "unindent",
  "url",
@@ -7314,6 +7316,7 @@ dependencies = [
  "smallvec",
  "theme",
  "time",
+ "time_format",
  "ui",
  "workspace",
 ]

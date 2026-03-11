@@ -333,6 +333,47 @@ fn calculate_month_difference(timestamp: OffsetDateTime, reference: OffsetDateTi
     }
 }
 
+/// Determines how frequently a relative timestamp display should be refreshed.
+pub trait RefreshSchedule {
+    /// Returns how long until the next UI refresh, or `None` if no refresh is needed.
+    fn interval_for_age(&self, age: time::Duration) -> Option<std::time::Duration>;
+}
+
+/// Default schedule: minute-level for recent, hourly for days, daily for weeks, then disabled.
+pub struct DefaultRefreshSchedule;
+
+impl RefreshSchedule for DefaultRefreshSchedule {
+    fn interval_for_age(&self, age: time::Duration) -> Option<std::time::Duration> {
+        let days = age.whole_days();
+        match days {
+            0 => Some(std::time::Duration::from_secs(60)),
+            1..=6 => Some(std::time::Duration::from_secs(3600)),
+            7..=27 => Some(std::time::Duration::from_secs(86400)),
+            _ => None,
+        }
+    }
+}
+
+/// A rendered relative timestamp bundled with its refresh recommendation.
+pub struct LiveRelativeTimestamp {
+    pub text: String,
+    pub refresh_after: Option<std::time::Duration>,
+}
+
+/// Format a relative timestamp and compute its refresh interval in one shot.
+pub fn format_live_relative_timestamp(
+    timestamp: OffsetDateTime,
+    reference: OffsetDateTime,
+    schedule: &impl RefreshSchedule,
+) -> LiveRelativeTimestamp {
+    let age = reference - timestamp;
+    LiveRelativeTimestamp {
+        text: format_relative_time(timestamp, reference)
+            .unwrap_or_else(|| format_relative_date(timestamp, reference)),
+        refresh_after: schedule.interval_for_age(age),
+    }
+}
+
 /// Formats a timestamp, which is either in 12-hour or 24-hour time format.
 /// Note:
 /// This function does not respect the user's date and time preferences.

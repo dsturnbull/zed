@@ -150,6 +150,7 @@ mod tests {
             title: title.to_string().into(),
             messages: Vec::new(),
             updated_at,
+            created_at: None,
             detailed_summary: None,
             initial_project_snapshot: None,
             cumulative_token_usage: Default::default(),

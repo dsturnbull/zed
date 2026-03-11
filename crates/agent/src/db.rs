@@ -57,6 +57,8 @@ pub struct DbThread {
     pub messages: Vec<DbMessage>,
     pub updated_at: DateTime<Utc>,
     #[serde(default)]
+    pub created_at: Option<DateTime<Utc>>,
+    #[serde(default)]
     pub detailed_summary: Option<SharedString>,
     #[serde(default)]
     pub initial_project_snapshot: Option<Arc<crate::ProjectSnapshot>>,
@@ -118,6 +120,7 @@ impl SharedThread {
             title: format!("🔗 {}", self.title).into(),
             messages: self.messages,
             updated_at: self.updated_at,
+            created_at: None,
             detailed_summary: None,
             initial_project_snapshot: None,
             cumulative_token_usage: Default::default(),
@@ -293,6 +296,7 @@ impl DbThread {
             title: thread.summary,
             messages,
             updated_at: thread.updated_at,
+            created_at: None,
             detailed_summary: match thread.detailed_summary_state {
                 crate::legacy_thread::DetailedSummaryState::NotGenerated
                 | crate::legacy_thread::DetailedSummaryState::Generating => None,
@@ -564,12 +568,12 @@ impl ThreadsDatabase {
 
         self.executor.spawn(async move {
             let connection = connection.lock();
-            let mut select = connection.select_bound::<Arc<str>, (DataType, Vec<u8>)>(indoc! {"
-                SELECT data_type, data FROM threads WHERE id = ? LIMIT 1
+            let mut select = connection.select_bound::<Arc<str>, (DataType, Vec<u8>, Option<String>)>(indoc! {"
+                SELECT data_type, data, created_at FROM threads WHERE id = ? LIMIT 1
             "})?;
 
             let rows = select(id.0)?;
-            if let Some((data_type, data)) = rows.into_iter().next() {
+            if let Some((data_type, data, created_at_str)) = rows.into_iter().next() {
                 let json_data = match data_type {
                     DataType::Zstd => {
                         let decompressed = zstd::decode_all(&data[..])?;
@@ -577,7 +581,10 @@ impl ThreadsDatabase {
                     }
                     DataType::Json => String::from_utf8(data)?,
                 };
-                let thread = DbThread::from_json(json_data.as_bytes())?;
+                let mut thread = DbThread::from_json(json_data.as_bytes())?;
+                thread.created_at = created_at_str
+                    .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
                 Ok(Some(thread))
             } else {
                 Ok(None)
@@ -682,6 +689,7 @@ mod tests {
             title: title.to_string().into(),
             messages: Vec::new(),
             updated_at,
+            created_at: None,
             detailed_summary: None,
             initial_project_snapshot: None,
             cumulative_token_usage: Default::default(),

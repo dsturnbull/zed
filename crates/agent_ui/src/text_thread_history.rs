@@ -629,19 +629,18 @@ pub enum EntryTimeFormat {
 
 impl EntryTimeFormat {
     fn format_timestamp(self, timestamp: i64, timezone: UtcOffset) -> String {
-        let datetime = OffsetDateTime::from_unix_timestamp(timestamp)
-            .unwrap_or_else(|_| OffsetDateTime::now_utc())
-            .to_offset(timezone);
+        let timestamp = OffsetDateTime::from_unix_timestamp(timestamp)
+            .unwrap_or_else(|_| OffsetDateTime::now_utc());
 
         match self {
-            EntryTimeFormat::DateAndTime => datetime.format(&time::macros::format_description!(
-                "[month repr:short] [day], [year]"
-            )),
-            EntryTimeFormat::TimeOnly => {
-                datetime.format(&time::macros::format_description!("[hour]:[minute]"))
-            }
+            EntryTimeFormat::DateAndTime => time_format::format_localized_timestamp(
+                timestamp,
+                OffsetDateTime::now_utc(),
+                timezone,
+                time_format::TimestampFormat::EnhancedAbsolute,
+            ),
+            EntryTimeFormat::TimeOnly => time_format::format_time(timestamp.to_offset(timezone)),
         }
-        .unwrap_or_default()
     }
 }
 

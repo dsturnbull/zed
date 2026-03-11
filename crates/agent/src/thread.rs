@@ -880,6 +880,7 @@ enum CompletionError {
 pub struct Thread {
     id: acp::SessionId,
     prompt_id: PromptId,
+    created_at: Option<DateTime<Utc>>,
     updated_at: DateTime<Utc>,
     title: Option<SharedString>,
     pending_title_generation: Option<Task<()>>,
@@ -1001,6 +1002,7 @@ impl Thread {
         Self {
             id: acp::SessionId::new(uuid::Uuid::new_v4().to_string()),
             prompt_id: PromptId::new(),
+            created_at: None,
             updated_at: Utc::now(),
             title: None,
             pending_title_generation: None,
@@ -1048,6 +1050,14 @@ impl Thread {
     /// Returns true if this thread was imported from a shared thread.
     pub fn is_imported(&self) -> bool {
         self.imported
+    }
+
+    pub fn created_at(&self) -> Option<DateTime<Utc>> {
+        self.created_at
+    }
+
+    pub fn updated_at(&self) -> DateTime<Utc> {
+        self.updated_at
     }
 
     pub fn replay(
@@ -1246,6 +1256,7 @@ impl Thread {
             speed: db_thread.speed,
             project,
             action_log,
+            created_at: db_thread.created_at,
             updated_at: db_thread.updated_at,
             prompt_capabilities_tx,
             prompt_capabilities_rx,
@@ -1266,6 +1277,7 @@ impl Thread {
             title: self.title(),
             messages: self.messages.clone(),
             updated_at: self.updated_at,
+            created_at: self.created_at,
             detailed_summary: self.summary.clone(),
             initial_project_snapshot: None,
             cumulative_token_usage: self.cumulative_token_usage,

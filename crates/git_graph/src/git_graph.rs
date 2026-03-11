@@ -30,11 +30,11 @@ use std::{
     ops::Range,
     rc::Rc,
     sync::Arc,
-    sync::OnceLock,
     time::{Duration, Instant},
 };
 use theme::{AccentColors, ThemeSettings};
-use time::{OffsetDateTime, UtcOffset, format_description::BorrowedFormatItem};
+use time::{OffsetDateTime, UtcOffset};
+use time_format::TimestampFormat;
 use ui::{
     ButtonLike, Chip, CommonAnimationExt as _, ContextMenu, DiffStat, Divider, ScrollableHandle,
     Table, TableColumnWidths, TableInteractionState, TableResizeBehavior, Tooltip, WithScrollbar,
@@ -249,25 +249,14 @@ actions!(
     ]
 );
 
-fn timestamp_format() -> &'static [BorrowedFormatItem<'static>] {
-    static FORMAT: OnceLock<Vec<BorrowedFormatItem<'static>>> = OnceLock::new();
-    FORMAT.get_or_init(|| {
-        time::format_description::parse("[day] [month repr:short] [year] [hour]:[minute]")
-            .unwrap_or_default()
-    })
-}
-
 fn format_timestamp(timestamp: i64) -> String {
     let Ok(datetime) = OffsetDateTime::from_unix_timestamp(timestamp) else {
         return "Unknown".to_string();
     };
 
-    let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
-    let local_datetime = datetime.to_offset(local_offset);
-
-    local_datetime
-        .format(timestamp_format())
-        .unwrap_or_default()
+    let timezone = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
+    let reference = OffsetDateTime::now_utc();
+    time_format::format_localized_timestamp(datetime, reference, timezone, TimestampFormat::Absolute)
 }
 
 fn accent_colors_count(accents: &AccentColors) -> usize {
@@ -1375,11 +1364,8 @@ impl GitGraph {
             .map(|datetime| {
                 let local_offset = UtcOffset::current_local_offset().unwrap_or(UtcOffset::UTC);
                 let local_datetime = datetime.to_offset(local_offset);
-                let format =
-                    time::format_description::parse("[month repr:short] [day], [year]").ok();
-                format
-                    .and_then(|f| local_datetime.format(&f).ok())
-                    .unwrap_or_default()
+                let reference = OffsetDateTime::now_utc().to_offset(local_offset);
+                time_format::format_date_medium(local_datetime, reference, false)
             })
             .unwrap_or_default();
 

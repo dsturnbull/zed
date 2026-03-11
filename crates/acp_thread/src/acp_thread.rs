@@ -27,6 +27,7 @@ use std::process::ExitStatus;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
+use time::OffsetDateTime;
 use task::{Shell, ShellBuilder};
 pub use terminal::*;
 use text::Bias;
@@ -954,6 +955,8 @@ struct RunningTurn {
 pub struct AcpThread {
     session_id: acp::SessionId,
     cwd: Option<PathBuf>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
     parent_session_id: Option<acp::SessionId>,
     title: SharedString,
     provisional_title: Option<SharedString>,
@@ -1138,9 +1141,12 @@ impl AcpThread {
             }
         });
 
+        let now = OffsetDateTime::now_utc();
         Self {
             parent_session_id,
             cwd,
+            created_at: now,
+            updated_at: now,
             action_log,
             shared_buffers: Default::default(),
             entries: Default::default(),
@@ -1221,6 +1227,19 @@ impl AcpThread {
 
     pub fn cwd(&self) -> Option<&PathBuf> {
         self.cwd.as_ref()
+    }
+
+    pub fn created_at(&self) -> OffsetDateTime {
+        self.created_at
+    }
+
+    pub fn updated_at(&self) -> OffsetDateTime {
+        self.updated_at
+    }
+
+    pub fn set_timestamps(&mut self, created_at: OffsetDateTime, updated_at: OffsetDateTime) {
+        self.created_at = created_at;
+        self.updated_at = updated_at;
     }
 
     pub fn status(&self) -> ThreadStatus {
@@ -2094,6 +2113,7 @@ impl AcpThread {
         cx: &mut Context<Self>,
         f: impl 'static + AsyncFnOnce(WeakEntity<Self>, &mut AsyncApp) -> Result<acp::PromptResponse>,
     ) -> BoxFuture<'static, Result<Option<acp::PromptResponse>>> {
+        self.updated_at = OffsetDateTime::now_utc();
         self.clear_completed_plan_entries(cx);
         self.had_error = false;
 

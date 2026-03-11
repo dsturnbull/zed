@@ -10,6 +10,8 @@ use std::{
 };
 
 use acp_thread::{AcpThread, MentionUri, ThreadStatus};
+use time::OffsetDateTime;
+use time_format::{DefaultRefreshSchedule, LiveRelativeTimestamp};
 use agent::{ContextServerRegistry, SharedThread, ThreadStore};
 use agent_client_protocol as acp;
 use agent_servers::AgentServer;
@@ -898,6 +900,7 @@ pub struct AgentPanel {
     on_boarding_upsell_dismissed: AtomicBool,
     _active_view_observation: Option<Subscription>,
     pub(crate) sidebar: Option<Entity<crate::sidebar::Sidebar>>,
+    _timestamp_refresh_task: Option<Task<()>>,
 }
 
 impl AgentPanel {
@@ -1234,6 +1237,7 @@ impl AgentPanel {
             on_boarding_upsell_dismissed: AtomicBool::new(OnboardingUpsell::dismissed()),
             _active_view_observation: None,
             sidebar: None,
+            _timestamp_refresh_task: None,
         };
 
         // Initial sync of agent servers from extensions
@@ -2196,6 +2200,8 @@ impl AgentPanel {
             }
             self.retain_running_thread(old_view, cx);
         }
+
+        self.schedule_timestamp_refresh(cx);
 
         // Subscribe to the active ThreadView's events (e.g. FirstSendRequested)
         // so the panel can intercept the first send for worktree creation.
@@ -4424,6 +4430,86 @@ impl AgentPanel {
         }
     }
 
+    fn render_thread_timestamps(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let thread = self.active_agent_thread(cx)?;
+        let thread = thread.read(cx);
+
+        if thread.entries().is_empty() {
+            return None;
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let timezone = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
+
+        let created_text = time_format::format_localized_timestamp(
+            thread.created_at(),
+            now,
+            timezone,
+            time_format::TimestampFormat::MediumAbsolute,
+        );
+
+        let LiveRelativeTimestamp {
+            text: updated_text, ..
+        } = time_format::format_live_relative_timestamp(
+            thread.updated_at(),
+            now,
+            &DefaultRefreshSchedule,
+        );
+
+        Some(
+            h_flex()
+                .w_full()
+                .px(DynamicSpacing::Base06.rems(cx))
+                .py(DynamicSpacing::Base01.rems(cx))
+                .gap_1()
+                .bg(cx.theme().colors().tab_bar_background)
+                .border_b_1()
+                .border_color(cx.theme().colors().border)
+                .child(
+                    Label::new(format!("Created {created_text}"))
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall),
+                )
+                .child(
+                    Label::new("·")
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall),
+                )
+                .child(
+                    Label::new(format!("Updated {updated_text}"))
+                        .color(Color::Muted)
+                        .size(LabelSize::XSmall),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn schedule_timestamp_refresh(&mut self, cx: &mut Context<Self>) {
+        let refresh_after = self
+            .active_agent_thread(cx)
+            .map(|thread| {
+                let now = OffsetDateTime::now_utc();
+                let live = time_format::format_live_relative_timestamp(
+                    thread.read(cx).updated_at(),
+                    now,
+                    &DefaultRefreshSchedule,
+                );
+                live.refresh_after
+            })
+            .flatten();
+
+        self._timestamp_refresh_task = refresh_after.map(|duration| {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(duration).await;
+                this.update(cx, |this, cx| {
+                    cx.notify();
+                    this.schedule_timestamp_refresh(cx);
+                })
+                .ok();
+            })
+        });
+    }
+
     fn render_worktree_creation_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let status = self.worktree_creation_status.as_ref()?;
         match status {
@@ -4906,6 +4992,7 @@ impl Render for AgentPanel {
                 }
             }))
             .child(self.render_toolbar(window, cx))
+            .children(self.render_thread_timestamps(cx))
             .children(self.render_worktree_creation_status(cx))
             .children(self.render_workspace_trust_message(cx))
             .children(self.render_onboarding(window, cx))

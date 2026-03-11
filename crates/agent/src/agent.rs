@@ -334,6 +334,8 @@ impl NativeAgent {
         let draft_prompt = thread.draft_prompt().map(Vec::from);
         let scroll_position = thread.ui_scroll_position();
         let token_usage = thread.latest_token_usage();
+        let created_at = thread.created_at().and_then(chrono_to_time);
+        let updated_at = chrono_to_time(thread.updated_at());
         let project = thread.project.clone();
         let action_log = thread.action_log.clone();
         let prompt_capabilities_rx = thread.prompt_capabilities_rx.clone();
@@ -349,6 +351,10 @@ impl NativeAgent {
                 prompt_capabilities_rx,
                 cx,
             );
+            let created = created_at.unwrap_or(acp_thread.created_at());
+            if let Some(updated) = updated_at {
+                acp_thread.set_timestamps(created, updated);
+            }
             acp_thread.set_draft_prompt(draft_prompt);
             acp_thread.set_ui_scroll_position(scroll_position);
             acp_thread.update_token_usage(token_usage, cx);
@@ -2856,4 +2862,8 @@ fn mcp_message_content_to_acp_content_block(
             acp::ContentBlock::ResourceLink(link)
         }
     }
+}
+
+fn chrono_to_time(dt: DateTime<Utc>) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::from_unix_timestamp(dt.timestamp()).ok()
 }

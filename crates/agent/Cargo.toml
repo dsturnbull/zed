@@ -67,6 +67,7 @@ strsim.workspace = true
 task.workspace = true
 telemetry.workspace = true
 text.workspace = true
+time.workspace = true
 thiserror.workspace = true
 ui.workspace = true
 url.workspace = true
