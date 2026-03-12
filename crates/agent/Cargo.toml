@@ -105,4 +105,5 @@ theme = { workspace = true, "features" = ["test-support"] }
 tree-sitter-rust.workspace = true
 unindent = { workspace = true }
 worktree = { workspace = true, "features" = ["test-support"] }
+partial-json-fixer.workspace = true
 zlog.workspace = true

@@ -1541,6 +1541,24 @@ mod tests {
         );
     }
 
+    /// Demonstrates the bug: the LLM is streaming `"path": "root/file_2.txt"`
+    /// but has only emitted `"path": "root/file` so far — note the missing
+    /// closing `"`. `partial_json_fixer` synthesises the closing double-quote
+    /// (and brace), producing `"path": "root/file"` — a truncated path that
+    /// points at the WRONG file.
+    #[test]
+    #[should_panic(expected = "partial_json_fixer truncated the path")]
+    fn test_fixer_closed_truncated_path_deserializes() {
+        let full_path = "root/file_2.txt";
+        let truncated_json = r#"{"display_description": "Overwrite file", "path": "root/file"#;
+        let fixed = partial_json_fixer::fix_json(truncated_json);
+        let value: serde_json::Value = serde_json::from_str(&fixed).unwrap();
+        let parsed: StreamingEditFileToolTitleInput =
+            serde_json::from_value(value).expect("fixer output is valid JSON");
+        let path = parsed.path.expect("path field is present");
+        pretty_assertions::assert_eq!(path, full_path, "partial_json_fixer truncated the path");
+    }
+
     #[gpui::test]
     async fn test_streaming_cancellation_during_partials(cx: &mut TestAppContext) {
         let (tool, _project, _action_log, _fs, _thread) =

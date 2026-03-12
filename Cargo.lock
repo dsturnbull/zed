@@ -193,6 +193,7 @@ dependencies = [
  "lsp",
  "open",
  "parking_lot",
+ "partial-json-fixer",
  "paths",
  "pretty_assertions",
  "project",
