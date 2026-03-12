@@ -186,7 +186,7 @@ members = [
     "crates/sum_tree",
     "crates/svg_preview",
     "crates/system_specs",
-    "crates/syntax_theme",
+    "crates/typst_viewer",
     "crates/tab_switcher",
     "crates/task",
     "crates/tasks_ui",
@@ -372,6 +372,7 @@ lsp = { path = "crates/lsp" }
 markdown = { path = "crates/markdown" }
 markdown_preview = { path = "crates/markdown_preview" }
 svg_preview = { path = "crates/svg_preview" }
+typst_viewer = { path = "crates/typst_viewer" }
 media = { path = "crates/media" }
 menu = { path = "crates/menu" }
 mermaid-rs-renderer = { git = "https://github.com/zed-industries/mermaid-rs-renderer", rev = "374db9ead5426697c6c2111151d9f246899bc638", default-features = false }
@@ -898,6 +899,8 @@ proc-macro2 = { opt-level = 3 }
 
 taffy = { opt-level = 3 }
 resvg = { opt-level = 3 }
+usvg = { opt-level = 3 }
+tiny-skia = { opt-level = 3 }
 wasmtime = { opt-level = 3 }
 # Build single-source-file crates with cg=1 as it helps make `cargo build` of a whole workspace a bit faster
 activity_indicator = { codegen-units = 1 }
