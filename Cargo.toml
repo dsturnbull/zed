@@ -410,7 +410,7 @@ remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
 
-pty_host = { git = "https://github.com/dsturnbull/pty-host", rev = "b4a9ee1afbce0bf4e371b88ff9ba952659b50ed1" }
+pty_host = { git = "https://github.com/dsturnbull/pty-host", rev = "a59584b45efeb9770bae1fb6c95a039efd0d95dd" }
 pty_host_bin = { path = "crates/pty_host_bin" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
