@@ -1043,7 +1043,7 @@ impl Terminal {
 
                 let mark_count = self.term.lock().semantic_marks().len();
                 if mark_count > 0 {
-                    log::trace!("Terminal wakeup: {mark_count} semantic marks");
+                    log::info!("Terminal wakeup: {mark_count} semantic marks");
                 }
 
                 if let TerminalType::Pty { info, .. } = &self.terminal_type {
@@ -1435,15 +1435,16 @@ impl Terminal {
         let term = self.term.lock();
         let marks = term.semantic_marks();
         let zones = term.semantic_zones();
+        let topmost = term.topmost_line();
 
-        log::trace!(
+        log::info!(
             "recent_command_outputs: {} marks, {} zones, limit={}",
             marks.len(),
             zones.len(),
             limit,
         );
         for (i, zone) in zones.iter().enumerate() {
-            log::trace!(
+            log::info!(
                 "  zone[{}]: {:?} start=({},{}) end=({},{})",
                 i,
                 zone.zone_type,
@@ -1458,6 +1459,17 @@ impl Terminal {
 
         for zone in zones.iter().rev() {
             if zone.zone_type != alacritty_terminal::SemanticZoneType::Output {
+                continue;
+            }
+            // Skip zones whose lines have scrolled out of the grid.
+            if zone.start.line < topmost || zone.end.line < topmost {
+                log::info!(
+                    "  skipping out-of-bounds zone: {:?} start=({},{}) end=({},{}) topmost={}",
+                    zone.zone_type,
+                    zone.start.line.0, zone.start.column.0,
+                    zone.end.line.0, zone.end.column.0,
+                    topmost.0,
+                );
                 continue;
             }
             let output = term.bounds_to_string(zone.start, zone.end);
@@ -1513,11 +1525,17 @@ impl Terminal {
                 let preceding = &zones[output_index - 1];
                 if preceding.zone_type == alacritty_terminal::SemanticZoneType::Input {
                     // Input zone found — Prompt zone is one further back.
+                    if preceding.start.line < topmost || preceding.end.line < topmost {
+                        return None;
+                    }
                     let input_text = term.bounds_to_string(preceding.start, preceding.end);
                     let input_trimmed = input_text.trim();
                     if output_index >= 2 {
                         let prompt_zone = &zones[output_index - 2];
-                        if prompt_zone.zone_type == alacritty_terminal::SemanticZoneType::Prompt {
+                        if prompt_zone.zone_type == alacritty_terminal::SemanticZoneType::Prompt
+                            && prompt_zone.start.line >= topmost
+                            && prompt_zone.end.line >= topmost
+                        {
                             let p = term.bounds_to_string(prompt_zone.start, prompt_zone.end);
                             let p_trimmed = p.trim();
                             if !p_trimmed.is_empty() {
@@ -1528,7 +1546,10 @@ impl Terminal {
                             }
                         }
                     }
-                } else if preceding.zone_type == alacritty_terminal::SemanticZoneType::Prompt {
+                } else if preceding.zone_type == alacritty_terminal::SemanticZoneType::Prompt
+                    && preceding.start.line >= topmost
+                    && preceding.end.line >= topmost
+                {
                     let p = term.bounds_to_string(preceding.start, preceding.end);
                     let last_line = p.lines().last().unwrap_or("").trim();
                     if !last_line.is_empty() {
@@ -1539,7 +1560,7 @@ impl Terminal {
             })()
             .unwrap_or_default();
 
-            log::trace!(
+            log::info!(
                 "  -> output zone: command={:?}, prompt={:?}, output_lines={}",
                 command_name,
                 prompt_text,

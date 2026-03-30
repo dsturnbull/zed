@@ -877,13 +877,98 @@ pub(crate) fn crease_for_mention(
     range: Range<Anchor>,
     editor_entity: WeakEntity<Editor>,
 ) -> Crease<Anchor> {
+    crease_for_mention_with_uri(label, icon_path, tooltip, range, editor_entity, None, None)
+}
+
+pub(crate) fn crease_for_mention_with_uri(
+    label: SharedString,
+    icon_path: SharedString,
+    tooltip: Option<SharedString>,
+    range: Range<Anchor>,
+    editor_entity: WeakEntity<Editor>,
+    mention_uri: Option<MentionUri>,
+    workspace: Option<WeakEntity<Workspace>>,
+) -> Crease<Anchor> {
+    let collapse_editor = editor_entity.clone();
+    let trailer_mention_uri = mention_uri.clone();
+    let trailer_workspace = workspace.clone();
+    // Use the range start to derive unique element IDs for trailer buttons,
+    // avoiding collisions when multiple creases share the same row.
+    let crease_id_seed = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        range.start.hash(&mut hasher);
+        hasher.finish()
+    };
     let placeholder = FoldPlaceholder {
-        render: render_fold_icon_button(icon_path.clone(), label.clone(), tooltip, editor_entity),
+        render: render_fold_icon_button_with_uri(
+            icon_path.clone(),
+            label.clone(),
+            tooltip,
+            editor_entity,
+            mention_uri,
+            workspace,
+        ),
         merge_adjacent: false,
         ..Default::default()
     };
 
-    let render_trailer = move |_row, _unfold, _window: &mut Window, _cx: &mut App| Empty.into_any();
+    let render_trailer = move |row: MultiBufferRow,
+                               is_folded: bool,
+                               _window: &mut Window,
+                               _cx: &mut App| {
+        use ui::{ButtonLike, ButtonSize, ButtonStyle, Color, Icon, IconName, IconSize, h_flex};
+        if is_folded {
+            return Empty.into_any_element();
+        }
+        let collapse_editor = collapse_editor.clone();
+
+        let mut trailer = h_flex().gap_0p5();
+
+        // Navigate-to-terminal button (only for TerminalSelection URIs).
+        if let Some(uri) = trailer_mention_uri.clone() {
+            if matches!(uri, MentionUri::TerminalSelection { .. }) {
+                if let Some(ws) = trailer_workspace.clone() {
+                    trailer = trailer.child(
+                        ButtonLike::new(("crease-navigate", crease_id_seed))
+                            .style(ButtonStyle::Subtle)
+                            .size(ButtonSize::Compact)
+                            .tooltip(ui::Tooltip::text("Go to terminal"))
+                            .child(
+                                Icon::new(IconName::ArrowUpRight)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .on_click(move |_, window, cx| {
+                                crate::ui::open_mention_uri(uri.clone(), &ws, window, cx);
+                            }),
+                    );
+                }
+            }
+        }
+
+        // Collapse button.
+        let collapse_editor_inner = collapse_editor.clone();
+        trailer = trailer.child(
+            ButtonLike::new(("crease-collapse", crease_id_seed))
+                .style(ButtonStyle::Subtle)
+                .size(ButtonSize::Compact)
+                .child(
+                    Icon::new(IconName::ChevronUp)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .on_click(move |_, window, cx| {
+                    collapse_editor_inner
+                        .update(cx, |editor, cx| {
+                            editor.fold_at(row, window, cx);
+                        })
+                        .ok();
+                }),
+        );
+
+        trailer.into_any_element()
+    };
 
     Crease::inline(range, placeholder, fold_toggle("mention"), render_trailer)
         .with_metadata(CreaseMetadata { icon_path, label })
@@ -895,6 +980,17 @@ fn render_fold_icon_button(
     tooltip: Option<SharedString>,
     editor: WeakEntity<Editor>,
 ) -> Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement> {
+    render_fold_icon_button_with_uri(icon_path, label, tooltip, editor, None, None)
+}
+
+fn render_fold_icon_button_with_uri(
+    icon_path: SharedString,
+    label: SharedString,
+    tooltip: Option<SharedString>,
+    editor: WeakEntity<Editor>,
+    mention_uri: Option<MentionUri>,
+    workspace: Option<WeakEntity<Workspace>>,
+) -> Arc<dyn Send + Sync + Fn(FoldId, Range<Anchor>, &mut App) -> AnyElement> {
     Arc::new({
         move |fold_id, fold_range, cx| {
             let is_in_text_selection = editor
@@ -903,6 +999,10 @@ fn render_fold_icon_button(
 
             MentionCrease::new(fold_id, icon_path.clone(), label.clone())
                 .is_toggled(is_in_text_selection)
+                .mention_uri(mention_uri.clone())
+                .workspace(workspace.clone())
+                .fold_range(fold_range.clone())
+                .editor(editor.clone())
                 .when_some(tooltip.clone(), |this, tooltip_text| {
                     this.tooltip(tooltip_text)
                 })
@@ -1233,12 +1333,12 @@ pub(crate) fn insert_terminal_output_crease(
     prompt: Option<&str>,
     terminal_id: Option<u64>,
     icon_path: &SharedString,
+    workspace: Option<WeakEntity<Workspace>>,
     window: &mut Window,
     cx: &mut App,
 ) {
     use acp_thread::MentionUri;
     use editor::display_map::Crease;
-    use ui::{ButtonLike, ButtonSize, ButtonStyle, Color, Icon, IconName, IconSize, Label};
 
     let line_count = output.lines().count() as u32;
     let mention_uri = MentionUri::TerminalSelection {
@@ -1283,76 +1383,14 @@ pub(crate) fn insert_terminal_output_crease(
             .head()
             .bias_left(&snapshot);
 
-        let fold_placeholder = FoldPlaceholder {
-            render: Arc::new({
-                let crease_label = crease_label.clone();
-                let icon_path = icon_path.clone();
-                let editor_weak = editor_weak.clone();
-                move |fold_id, fold_range, _cx| {
-                    let editor_weak = editor_weak.clone();
-                    let fold_range = fold_range.clone();
-                    ButtonLike::new(fold_id)
-                        .style(ButtonStyle::Filled)
-                        .layer(ui::ElevationIndex::ElevatedSurface)
-                        .child(
-                            Icon::from_path(icon_path.clone())
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        .child(Label::new(crease_label.clone()).single_line())
-                        .on_click(move |_, window, cx| {
-                            editor_weak
-                                .update(cx, |editor, cx| {
-                                    let buffer_start = fold_range
-                                        .start
-                                        .to_offset(&editor.buffer().read(cx).read(cx));
-                                    let point = editor
-                                        .buffer()
-                                        .read(cx)
-                                        .read(cx)
-                                        .offset_to_point(buffer_start);
-                                    let buffer_row = multi_buffer::MultiBufferRow(point.row);
-                                    editor.unfold_at(buffer_row, window, cx);
-                                })
-                                .ok();
-                        })
-                        .into_any_element()
-                }
-            }),
-            merge_adjacent: false,
-            ..Default::default()
-        };
-
-        let editor_for_trailer = editor_weak.clone();
-        let crease = Crease::inline(
+        let crease = crease_for_mention_with_uri(
+            crease_label.clone(),
+            icon_path.clone(),
+            None,
             anchor_before..anchor_after,
-            fold_placeholder,
-            |_row, _is_folded, _fold, _window, _cx| gpui::Empty,
-            move |row: multi_buffer::MultiBufferRow,
-                  is_folded: bool,
-                  _window: &mut Window,
-                  _cx: &mut App| {
-                if is_folded {
-                    return gpui::Empty.into_any_element();
-                }
-                let editor_for_trailer = editor_for_trailer.clone();
-                ButtonLike::new(("terminal-crease-collapse", row.0 as u64))
-                    .style(ButtonStyle::Subtle)
-                    .size(ButtonSize::Compact)
-                    .child(
-                        Icon::new(IconName::ChevronUp)
-                            .size(IconSize::XSmall)
-                            .color(Color::Muted),
-                    )
-                    .on_click(move |_, window, cx| {
-                        editor_for_trailer
-                            .update(cx, |editor, cx| {
-                                editor.fold_at(row, window, cx);
-                            })
-                            .ok();
-                    })
-                    .into_any_element()
-            },
+            editor_weak.clone(),
+            Some(mention_uri.clone()),
+            workspace,
         );
         let crease_ids = editor.insert_creases(vec![crease], cx);
         editor.fold_at(start_row, window, cx);

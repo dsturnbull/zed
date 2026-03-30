@@ -222,16 +222,16 @@ impl MentionUri {
                         line_range,
                     })
                 } else if path.starts_with("/agent/terminal-selection") {
-                    let line_count = single_query_param(&url, "lines")?
+                    let line_count = query_param(&url, "lines")
                         .unwrap_or_else(|| "0".to_string())
                         .parse::<u32>()
                         .unwrap_or(0);
-                    let command = single_query_param(&url, "command")?;
-                    let terminal_id = single_query_param(&url, "terminal_id")?
+                    let command = query_param(&url, "command");
+                    let terminal_id = query_param(&url, "terminal_id")
                         .and_then(|s| s.parse::<u64>().ok());
-                    let scroll_line = single_query_param(&url, "scroll_line")?
+                    let scroll_line = query_param(&url, "scroll_line")
                         .and_then(|s| s.parse::<i32>().ok());
-                    let scroll_col = single_query_param(&url, "scroll_col")?
+                    let scroll_col = query_param(&url, "scroll_col")
                         .and_then(|s| s.parse::<usize>().ok());
                     Ok(Self::TerminalSelection {
                         line_count,
@@ -497,6 +497,13 @@ fn single_query_param(url: &Url, name: &'static str) -> Result<Option<String>> {
         }
         _ => bail!("too many query pairs"),
     }
+}
+
+/// Like single_query_param but works with URLs that have multiple query pairs.
+fn query_param(url: &Url, name: &str) -> Option<String> {
+    url.query_pairs()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v.to_string())
 }
 
 pub fn selection_name(path: Option<&Path>, line_range: &RangeInclusive<u32>) -> String {

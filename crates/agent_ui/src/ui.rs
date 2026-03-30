@@ -13,5 +13,6 @@ pub use claude_agent_onboarding_modal::*;
 pub use end_trial_upsell::*;
 pub use hold_for_default::*;
 pub use mention_crease::*;
+pub(crate) use mention_crease::open_mention_uri;
 pub use model_selector_components::*;
 pub use undo_reject_toast::*;

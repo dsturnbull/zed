@@ -751,8 +751,11 @@ impl TerminalView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal
+        let line = self.terminal
             .update(cx, |term, _| term.scroll_to_previous_prompt());
+        if let Some(line) = line {
+            self.prompt_flash = Some((line, std::time::Instant::now()));
+        }
         cx.notify();
     }
 
@@ -762,8 +765,11 @@ impl TerminalView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal
+        let line = self.terminal
             .update(cx, |term, _| term.scroll_to_next_prompt());
+        if let Some(line) = line {
+            self.prompt_flash = Some((line, std::time::Instant::now()));
+        }
         cx.notify();
     }
 

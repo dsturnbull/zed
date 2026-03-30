@@ -554,7 +554,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                     .collect();
 
                 // Collect terminal selections from all terminal views if the terminal panel is visible
-                let terminal_selections: Vec<(String, Option<String>)> =
+                let terminal_selections: Vec<(String, Option<String>, u64)> =
                     terminal_selections_if_panel_open(workspace, cx);
 
                 const EDITOR_PLACEHOLDER: &str = "selection ";
@@ -576,16 +576,17 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                 let mut new_text: String = EDITOR_PLACEHOLDER.repeat(selections.len());
 
                 // Add terminal placeholders for each terminal selection
-                let terminal_ranges: Vec<(String, Option<String>, std::ops::Range<usize>)> =
+                let terminal_ranges: Vec<(String, Option<String>, u64, std::ops::Range<usize>)> =
                     terminal_selections
                         .into_iter()
-                        .map(|(text, command)| {
+                        .map(|(text, command, terminal_id)| {
                             let start = new_text.len();
                             new_text.push_str(TERMINAL_PLACEHOLDER);
-                            (text, command, start..(new_text.len() - 1))
+                            (text, command, terminal_id, start..(new_text.len() - 1))
                         })
                         .collect();
 
+                let workspace_weak = workspace.downgrade();
                 let callback = Arc::new({
                     let source_range = source_range.clone();
                     move |_: CompletionIntent, window: &mut Window, cx: &mut App| {
@@ -594,6 +595,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                         let mention_set = mention_set.clone();
                         let source_range = source_range.clone();
                         let terminal_ranges = terminal_ranges.clone();
+                        let workspace_weak = workspace_weak.clone();
                         window.defer(cx, move |window, cx| {
                             if let Some(editor) = editor.upgrade() {
                                 // Insert editor selections
@@ -612,7 +614,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                                 }
 
                                 // Insert terminal selections
-                                for (terminal_text, terminal_command, terminal_range) in terminal_ranges {
+                                for (terminal_text, terminal_command, terminal_id, terminal_range) in terminal_ranges {
                                     let snapshot = editor.read(cx).buffer().read(cx).snapshot(cx);
                                     let Some(start) =
                                         snapshot.as_singleton_anchor(source_range.start)
@@ -622,40 +624,80 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                                     let offset = start.to_offset(&snapshot);
 
                                     let line_count = terminal_text.lines().count() as u32;
-                                    let mention_uri = MentionUri::TerminalSelection { line_count, command: terminal_command, terminal_id: None, scroll_line: None, scroll_col: None };
-                                    let range = snapshot.anchor_after(offset + terminal_range.start)
-                                        ..snapshot.anchor_after(offset + terminal_range.end);
+                                    let mention_uri = MentionUri::TerminalSelection {
+                                        line_count,
+                                        command: terminal_command.clone(),
+                                        terminal_id: Some(terminal_id),
+                                        scroll_line: None,
+                                        scroll_col: None,
+                                    };
 
-                                    let crease = crate::mention_set::crease_for_mention(
-                                        mention_uri.name().into(),
-                                        mention_uri.icon_path(cx),
-                                        None,
-                                        range,
-                                        editor.downgrade(),
+                                    // Replace the placeholder text with actual console content
+                                    // so unfolding reveals the output even if the terminal is closed.
+                                    let formatted_text = format!(
+                                        "```console\n{}\n```",
+                                        terminal_text,
                                     );
+                                    let replace_start = offset + terminal_range.start;
+                                    let replace_end = offset + terminal_range.end;
 
-                                    let crease_id = editor.update(cx, |editor, cx| {
-                                        let crease_ids =
-                                            editor.insert_creases(vec![crease.clone()], cx);
-                                        editor.fold_creases(vec![crease], false, window, cx);
-                                        crease_ids.first().copied().unwrap()
-                                    });
+                                    editor.update(cx, |editor, cx| {
+                                        let snapshot = editor.buffer().read(cx).snapshot(cx);
+                                        let start_anchor = snapshot.anchor_after(replace_start);
+                                        let end_anchor = snapshot.anchor_after(replace_end);
 
-                                    mention_set
-                                        .update(cx, |mention_set, _| {
-                                            mention_set.insert_mention(
-                                                crease_id,
-                                                mention_uri.clone(),
-                                                gpui::Task::ready(Ok(
-                                                    crate::mention_set::Mention::Text {
-                                                        content: terminal_text,
-                                                        tracked_buffers: vec![],
-                                                    },
-                                                ))
-                                                .shared(),
+                                        editor.buffer().update(cx, |buffer, cx| {
+                                            buffer.edit(
+                                                [(replace_start..replace_end, formatted_text.as_str())],
+                                                None,
+                                                cx,
                                             );
-                                        })
-                                        .ok();
+                                        });
+
+                                        log::info!("terminal crease: replaced {}..{} with {} bytes of formatted text", replace_start, replace_end, formatted_text.len());
+                                        // Re-snapshot after edit to get correct anchors.
+                                        let snapshot = editor.buffer().read(cx).snapshot(cx);
+                                        let anchor_before = snapshot.anchor_after(replace_start);
+                                        let anchor_after = snapshot.anchor_before(
+                                            replace_start + formatted_text.len()
+                                        );
+                                        let range = anchor_before..anchor_after;
+
+                                        let crease = crate::mention_set::crease_for_mention_with_uri(
+                                            mention_uri.name().into(),
+                                            mention_uri.icon_path(cx),
+                                            None,
+                                            range,
+                                            cx.entity().downgrade(),
+                                            Some(mention_uri.clone()),
+                                            Some(workspace_weak.clone()),
+                                        );
+
+                                        let start_row = multi_buffer::MultiBufferRow(
+                                            snapshot.offset_to_point(replace_start).row
+                                        );
+                                        let crease_ids = editor.insert_creases(vec![crease], cx);
+                                        editor.fold_at(start_row, window, cx);
+                                        log::info!("terminal crease: folded at row {:?}, crease_ids={:?}", start_row, crease_ids);
+
+                                        if let Some(crease_id) = crease_ids.first().copied() {
+                                            mention_set
+                                                .update(cx, |mention_set, _| {
+                                                    mention_set.insert_mention(
+                                                        crease_id,
+                                                        mention_uri.clone(),
+                                                        gpui::Task::ready(Ok(
+                                                            crate::mention_set::Mention::Text {
+                                                                content: terminal_text.clone(),
+                                                                tracked_buffers: vec![],
+                                                            },
+                                                        ))
+                                                        .shared(),
+                                                    );
+                                                })
+                                                .ok();
+                                        }
+                                    });
                                 }
                             }
                         });
@@ -809,6 +851,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
         }
         .icon_path(cx);
 
+        let workspace_weak = workspace.downgrade();
         commands
             .into_iter()
             .map(|cmd| {
@@ -816,6 +859,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                 let command_name = cmd.command.clone();
                 let prompt = cmd.prompt.clone();
                 let output = cmd.output.clone();
+                let terminal_id = cmd.terminal_id;
 
                 // Empty new_text: the completion system replaces the
                 // trigger text with this, then our confirm callback inserts
@@ -839,6 +883,7 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                         let prompt = prompt.clone();
                         let output = output.clone();
                         let icon_path = icon_path.clone();
+                        let workspace_weak = workspace_weak.clone();
                         Arc::new(move |_, window, cx| {
                             let editor = editor.clone();
                             let mention_set = mention_set.clone();
@@ -846,21 +891,23 @@ impl<T: PromptCompletionProviderDelegate> PromptCompletionProvider<T> {
                             let prompt = prompt.clone();
                             let output = output.clone();
                             let icon_path = icon_path.clone();
+                            let workspace_weak = workspace_weak.clone();
                             window.defer(cx, move |window, cx| {
                                 let Some(editor) = editor.upgrade() else {
                                     return;
                                 };
                                 crate::mention_set::insert_terminal_output_crease(
-                                    editor,
-                                    mention_set,
-                                    &output,
-                                    Some(&command_name),
-                                    if prompt.is_empty() { None } else { Some(&prompt) },
-                                    None,
-                                    &icon_path,
-                                    window,
-                                    cx,
-                                );
+                                        editor,
+                                        mention_set,
+                                        &output,
+                                        Some(&command_name),
+                                        if prompt.is_empty() { None } else { Some(&prompt) },
+                                        Some(terminal_id),
+                                        &icon_path,
+                                        Some(workspace_weak.clone()),
+                                        window,
+                                        cx,
+                                    );
                             });
                             false
                         })
@@ -2152,7 +2199,7 @@ fn build_code_label_for_path(
 fn terminal_selections_if_panel_open(
     workspace: &Entity<Workspace>,
     cx: &App,
-) -> Vec<(String, Option<String>)> {
+) -> Vec<(String, Option<String>, u64)> {
     let Some(panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
         return Vec::new();
     };
@@ -2186,6 +2233,8 @@ pub(crate) struct RecentTerminalCommand {
     pub output: String,
     /// Display label for the completion menu (e.g. "cargo build (42 lines)").
     pub label: String,
+    /// The entity ID of the terminal that produced this command output.
+    pub terminal_id: u64,
 }
 
 /// Collects recent command outputs from all open terminals that have OSC 133
@@ -2202,7 +2251,7 @@ fn recent_terminal_commands(
         .read(cx)
         .recent_command_outputs(5, cx)
         .into_iter()
-        .map(|(command_name, prompt, output)| {
+        .map(|(command_name, prompt, output, terminal_id)| {
             let line_count = output.lines().count();
             let label = if line_count == 1 {
                 format!("{} (1 line)", command_name)
@@ -2214,6 +2263,7 @@ fn recent_terminal_commands(
                 prompt,
                 output,
                 label,
+                terminal_id,
             }
         })
         .collect()

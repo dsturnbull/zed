@@ -1095,36 +1095,48 @@ impl TerminalPanel {
     pub fn terminal_selections(&self, cx: &App) -> Vec<String> {
         self.terminal_selections_with_commands(cx)
             .into_iter()
-            .map(|(text, _command)| text)
+            .map(|(text, _command, _id)| text)
             .collect()
     }
 
     /// Returns all non-empty terminal selections paired with the shell command
     /// that produced them (if known from OSC 133 shell integration markers).
     ///
-    /// Each entry is `(selection_text, Option<command>)`. The command comes from
-    /// `Terminal::last_copy_snapshot` which is populated at copy time.
+    /// Each entry is `(selection_text, Option<command>, terminal_id)`.
+    /// The command comes from `Terminal::last_copy_snapshot` for selections,
+    /// or from semantic zones for the last command output fallback.
     pub fn terminal_selections_with_commands(
         &self,
         cx: &App,
-    ) -> Vec<(String, Option<String>)> {
+    ) -> Vec<(String, Option<String>, u64)> {
         self.center
             .panes()
             .iter()
             .flat_map(|pane| {
                 pane.read(cx).items().filter_map(|item| {
                     let terminal_view = item.downcast::<crate::TerminalView>()?;
+                    let terminal_id = terminal_view.read(cx).terminal().entity_id().as_u64();
                     let terminal = terminal_view.read(cx).terminal().read(cx);
-                    let text = terminal
+
+                    // If there is a selection, always use it.
+                    if let Some(text) = terminal
                         .last_content
                         .selection_text
                         .clone()
-                        .filter(|text| !text.is_empty())?;
-                    let command = terminal
-                        .last_copy_snapshot
-                        .as_ref()
-                        .and_then(|snapshot| snapshot.command.clone());
-                    Some((text, command))
+                        .filter(|t| !t.is_empty())
+                    {
+                        let command = terminal
+                            .last_copy_snapshot
+                            .as_ref()
+                            .and_then(|snapshot| snapshot.command.clone());
+                        return Some((text, command, terminal_id));
+                    }
+
+                    // No selection — fall back to the last command output
+                    // from OSC 133 semantic zones.
+                    let last = terminal.recent_command_outputs(1).into_iter().next()?;
+                    let (command, _prompt, output) = last;
+                    Some((output, Some(command), terminal_id))
                 })
             })
             .collect()
@@ -1133,19 +1145,26 @@ impl TerminalPanel {
     /// Returns recent command outputs from all terminals that have OSC 133
     /// shell integration markers. Each entry is `(command_name, prompt_text, output_text)`.
     /// Returns up to `limit` most recent commands across all terminals.
-    pub fn recent_command_outputs(&self, limit: usize, cx: &App) -> Vec<(String, String, String)> {
+    pub fn recent_command_outputs(&self, limit: usize, cx: &App) -> Vec<(String, String, String, u64)> {
         let mut results = Vec::new();
         for pane in self.center.panes() {
             for item in pane.read(cx).items() {
                 let Some(terminal_view) = item.downcast::<crate::TerminalView>() else {
                     continue;
                 };
-                let terminal = terminal_view.read(cx).terminal().read(cx);
+                let terminal_handle = terminal_view.read(cx).terminal();
+                let terminal_id = terminal_handle.entity_id().as_u64();
+                let terminal = terminal_handle.read(cx);
                 let remaining = limit.saturating_sub(results.len());
                 if remaining == 0 {
                     return results;
                 }
-                results.extend(terminal.recent_command_outputs(remaining));
+                results.extend(
+                    terminal
+                        .recent_command_outputs(remaining)
+                        .into_iter()
+                        .map(|(cmd, prompt, output)| (cmd, prompt, output, terminal_id)),
+                );
             }
         }
         results

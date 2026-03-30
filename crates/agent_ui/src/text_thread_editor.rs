@@ -1525,6 +1525,15 @@ impl TextThreadEditor {
             Some((selections, buffer))
         }) {
             agent_panel_delegate.quote_selection(workspace, selections, buffer, window, cx);
+        } else {
+            // No editor active — check for terminal content.
+            use terminal_view::terminal_panel::TerminalPanel;
+            if let Some(panel) = workspace.panel::<TerminalPanel>(cx) {
+                let terminal_content = panel.read(cx).terminal_selections_with_commands(cx);
+                if let Some((text, _command, _terminal_id)) = terminal_content.into_iter().next() {
+                    agent_panel_delegate.quote_terminal_text(workspace, text, window, cx);
+                }
+            }
         }
     }
 

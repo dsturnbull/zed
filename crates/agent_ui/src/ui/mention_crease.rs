@@ -2,7 +2,9 @@ use std::{ops::RangeInclusive, path::PathBuf, time::Duration};
 
 use acp_thread::MentionUri;
 use agent_client_protocol as acp;
-use editor::{Editor, SelectionEffects, scroll::Autoscroll};
+use editor::{Anchor, Editor, SelectionEffects, ToOffset, scroll::Autoscroll};
+use multi_buffer;
+use std::ops::Range;
 use gpui::{
     Animation, AnimationExt, AnyView, Context, IntoElement, WeakEntity, Window, pulsating_between,
 };
@@ -24,6 +26,8 @@ pub struct MentionCrease {
     is_loading: bool,
     tooltip: Option<SharedString>,
     image_preview: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyView + 'static>>,
+    fold_range: Option<Range<Anchor>>,
+    editor: Option<WeakEntity<Editor>>,
 }
 
 impl MentionCrease {
@@ -42,6 +46,8 @@ impl MentionCrease {
             is_loading: false,
             tooltip: None,
             image_preview: None,
+            fold_range: None,
+            editor: None,
         }
     }
 
@@ -62,6 +68,16 @@ impl MentionCrease {
 
     pub fn is_loading(mut self, is_loading: bool) -> Self {
         self.is_loading = is_loading;
+        self
+    }
+
+    pub fn fold_range(mut self, range: Range<Anchor>) -> Self {
+        self.fold_range = Some(range);
+        self
+    }
+
+    pub fn editor(mut self, editor: WeakEntity<Editor>) -> Self {
+        self.editor = Some(editor);
         self
     }
 
@@ -98,14 +114,44 @@ impl RenderOnce for MentionCrease {
             .height(button_height)
             .selected_style(ButtonStyle::Tinted(TintColor::Accent))
             .toggle_state(self.is_toggled)
-            .when_some(
-                self.mention_uri.clone().zip(self.workspace.clone()),
-                |this, (mention_uri, workspace)| {
+            .map(|this| {
+                let mention_uri = self.mention_uri.clone();
+                let workspace = self.workspace.clone();
+                let fold_range = self.fold_range.clone();
+                let editor = self.editor.clone();
+
+                if mention_uri.is_some() || fold_range.is_some() {
                     this.on_click(move |_event, window, cx| {
-                        open_mention_uri(mention_uri.clone(), &workspace, window, cx);
+                        // Primary action: unfold to show content inline.
+                        // This is consistent with how all other mention
+                        // creases behave (file selections, diagnostics, etc).
+                        if let Some((ref range, ref editor)) =
+                            fold_range.clone().zip(editor.clone())
+                        {
+                            editor
+                                .update(cx, |editor, cx| {
+                                    editor.unfold_ranges(
+                                        &[range.clone()],
+                                        true,
+                                        true,
+                                        cx,
+                                    );
+                                })
+                                .ok();
+                            return;
+                        }
+
+                        // No fold_range: try navigation as fallback.
+                        if let Some((ref uri, ref ws)) =
+                            mention_uri.clone().zip(workspace.clone())
+                        {
+                            open_mention_uri(uri.clone(), ws, window, cx);
+                        }
                     })
-                },
-            )
+                } else {
+                    this
+                }
+            })
             .child(
                 h_flex()
                     .pb_px()
@@ -145,19 +191,21 @@ impl RenderOnce for MentionCrease {
     }
 }
 
-fn open_mention_uri(
+/// Returns true if navigation succeeded, false if caller should fall back.
+pub(crate) fn open_mention_uri(
     mention_uri: MentionUri,
     workspace: &WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut App,
-) {
+) -> bool {
     let Some(workspace) = workspace.upgrade() else {
-        return;
+        return false;
     };
 
     workspace.update(cx, |workspace, cx| match mention_uri {
         MentionUri::File { abs_path } => {
             open_file(workspace, abs_path, None, window, cx);
+            true
         }
         MentionUri::Symbol {
             abs_path,
@@ -169,19 +217,24 @@ fn open_mention_uri(
             line_range,
         } => {
             open_file(workspace, abs_path, Some(line_range), window, cx);
+            true
         }
         MentionUri::Directory { abs_path } => {
             reveal_in_project_panel(workspace, abs_path, cx);
+            true
         }
         MentionUri::Thread { id, name } => {
             open_thread(workspace, id, name, window, cx);
+            true
         }
-        MentionUri::TextThread { .. } => {}
+        MentionUri::TextThread { .. } => true,
         MentionUri::Rule { id, .. } => {
             open_rule(workspace, id, window, cx);
+            true
         }
         MentionUri::Fetch { url } => {
             cx.open_url(url.as_str());
+            true
         }
         MentionUri::TerminalSelection {
             terminal_id,
@@ -189,13 +242,13 @@ fn open_mention_uri(
             scroll_col,
             ..
         } => {
-            scroll_to_terminal_source(workspace, terminal_id, scroll_line, scroll_col, window, cx);
+            return scroll_to_terminal_source(workspace, terminal_id, scroll_line, scroll_col, window, cx);
         }
         MentionUri::PastedImage
         | MentionUri::Selection { abs_path: None, .. }
         | MentionUri::Diagnostics { .. }
-        | MentionUri::GitDiff { .. } => {}
-    });
+        | MentionUri::GitDiff { .. } => false,
+    })
 }
 
 fn open_file(
@@ -289,37 +342,50 @@ fn open_thread(
 fn scroll_to_terminal_source(
     workspace: &mut Workspace,
     terminal_id: Option<u64>,
-    scroll_line: Option<i32>,
-    scroll_col: Option<usize>,
+    _scroll_line: Option<i32>,
+    _scroll_col: Option<usize>,
     window: &mut Window,
     cx: &mut Context<Workspace>,
-) {
+) -> bool {
     use terminal::alacritty_terminal::index::{Column, Line, Point as AlacPoint};
     use terminal_view::terminal_panel::TerminalPanel;
 
     let Some(id) = terminal_id else {
-        return;
+        log::info!("scroll_to_terminal_source: no terminal_id, falling back to unfold");
+        return false;
     };
+    log::info!("scroll_to_terminal_source: looking for terminal {id}");
 
     let Some(panel) = workspace.panel::<TerminalPanel>(cx) else {
-        return;
+        log::warn!("scroll_to_terminal_source: no TerminalPanel found");
+        return false;
     };
 
     let Some((terminal_view, _)) = panel.read(cx).find_terminal_by_id(id, cx) else {
-        return;
+        log::info!("scroll_to_terminal_source: terminal {id} not found, falling back to unfold");
+        return false;
     };
+    log::info!("scroll_to_terminal_source: found terminal, focusing panel");
 
-    let point = AlacPoint::new(
-        Line(scroll_line.unwrap_or(0)),
-        Column(scroll_col.unwrap_or(0)),
-    );
+    // TODO: use semantic mark sequence number to find the exact zone.
+    // For now, scroll to line -10 (10 lines into scrollback) as a proof
+    // of concept to verify the focus + scroll + flash pipeline works.
+    let target_line = Line(-10);
+    let point = AlacPoint::new(target_line, Column(0));
 
-    workspace.toggle_panel_focus::<TerminalPanel>(window, cx);
+    workspace.focus_panel::<TerminalPanel>(window, cx);
     terminal_view.update(cx, |view, cx| {
+        log::info!(
+            "scroll_to_terminal_source: scrolling to {:?} and setting flash",
+            point,
+        );
+        view.prompt_flash = Some((target_line, std::time::Instant::now()));
         view.terminal().update(cx, |terminal, _| {
             terminal.scroll_to_point(point);
         });
+        cx.notify();
     });
+    true
 }
 
 fn open_rule(

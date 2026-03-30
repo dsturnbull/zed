@@ -1059,6 +1059,7 @@ impl MessageEditor {
             None,
             terminal_id,
             &icon_path,
+            Some(self.workspace.clone()),
             window,
             cx,
         );

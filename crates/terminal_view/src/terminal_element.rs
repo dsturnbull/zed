@@ -1023,6 +1023,31 @@ impl Element for TerminalElement {
                     element
                 });
 
+                // Collect flash data before borrowing terminal content.
+                let prompt_flash_info = {
+                    let flash = self.terminal_view.read(cx).prompt_flash;
+                    if let Some((flash_line, flash_start)) = flash {
+                        let elapsed = flash_start.elapsed().as_secs_f32();
+                        let flash_duration = 1.0_f32;
+                        if elapsed < flash_duration {
+                            let alpha = 0.3 * (1.0 - elapsed / flash_duration);
+                            let cols = dimensions.num_columns().saturating_sub(1);
+                            // Schedule repaint for animation.
+                            let tv = self.terminal_view.clone();
+                            cx.defer(move |cx| { cx.notify(tv.entity_id()); });
+                            Some((flash_line, alpha, cols))
+                        } else {
+                            // Flash expired, clear it.
+                            self.terminal_view.update(cx, |view, _| {
+                                view.prompt_flash = None;
+                            });
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                };
+
                 let TerminalContent {
                     cells,
                     mode,
@@ -1043,6 +1068,16 @@ impl Element for TerminalElement {
                 if let Some(selection) = selection {
                     relative_highlighted_ranges
                         .push((selection.start..=selection.end, player_color.selection));
+                }
+
+                // Flash highlight for click-to-navigate from terminal mentions.
+                // prompt_flash data was captured before the content borrow.
+                if let Some((flash_line, flash_alpha, flash_cols)) = prompt_flash_info {
+                    use terminal::alacritty_terminal::index::Column as AlacColumn;
+                    let flash_color = gpui::hsla(210.0 / 360.0, 0.8, 0.6, flash_alpha);
+                    let flash_start_pt = AlacPoint::new(flash_line, AlacColumn(0));
+                    let flash_end_pt = AlacPoint::new(flash_line, AlacColumn(flash_cols));
+                    relative_highlighted_ranges.push((flash_start_pt..=flash_end_pt, flash_color));
                 }
 
                 // then have that representation be converted to the appropriate highlight data structure
