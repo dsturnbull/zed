@@ -543,6 +543,7 @@ impl TerminalBuilder {
             title_override: None,
             events: VecDeque::with_capacity(10),
             last_content: Default::default(),
+            keyboard_input_sent: false,
             last_mouse: None,
             matches: Vec::new(),
             selection_head: None,
