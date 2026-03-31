@@ -1754,7 +1754,7 @@ impl SerializableItem for TerminalView {
             }
             db.save_custom_title(item_id, workspace_id, custom_title)
                 .await?;
-            TERMINAL_DB
+            db
                 .save_session_id(item_id, workspace_id, session_id.clone())
                 .await?;
             log::info!(
@@ -1800,7 +1800,7 @@ impl SerializableItem for TerminalView {
                         .log_err()
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
-                    let session_id = TERMINAL_DB
+                    let session_id = db
                         .get_session_id(item_id, workspace_id)
                         .log_err()
                         .flatten()
