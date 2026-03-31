@@ -267,7 +267,21 @@ impl ThreadsArchiveView {
             .is_focused(window)
     }
 
+    fn session_id_at(&self, index: usize) -> Option<&acp::SessionId> {
+        match self.items.get(index) {
+            Some(ArchiveListItem::Entry { thread, .. }) => thread.session_id.as_ref(),
+            _ => None,
+        }
+    }
+
     fn update_items(&mut self, cx: &mut Context<Self>) {
+        let selected_session_id = self
+            .selection
+            .and_then(|ix| self.session_id_at(ix).cloned());
+        let hovered_session_id = self
+            .hovered_index
+            .and_then(|ix| self.session_id_at(ix).cloned());
+
         let store = ThreadMetadataStore::global(cx).read(cx);
 
         // If we're filtering to archived threads but none remain (e.g. the
@@ -296,6 +310,8 @@ impl ThreadsArchiveView {
 
         let mut items = Vec::with_capacity(sessions.len() + 5);
         let mut current_bucket: Option<TimeBucket> = None;
+        let mut new_selection = None;
+        let mut new_hovered_index = None;
 
         for session in sessions {
             let highlight_positions = if !query.is_empty() {
@@ -329,6 +345,19 @@ impl ThreadsArchiveView {
                 items.push(ArchiveListItem::BucketSeparator(entry_bucket));
             }
 
+            let entry_index = items.len();
+
+            if let Some(captured) = selected_session_id.as_ref() {
+                if Some(captured) == session.session_id.as_ref() {
+                    new_selection = Some(entry_index);
+                }
+            }
+            if let Some(captured) = hovered_session_id.as_ref() {
+                if Some(captured) == session.session_id.as_ref() {
+                    new_hovered_index = Some(entry_index);
+                }
+            }
+
             items.push(ArchiveListItem::Entry {
                 thread: session,
                 highlight_positions,
@@ -343,15 +372,14 @@ impl ThreadsArchiveView {
         self.list_state.reset(items.len());
         self.items = items;
 
-        if let Some(ix) = self.hovered_index {
-            if ix >= self.items.len() || !self.is_selectable_item(ix) {
-                self.hovered_index = None;
-            }
-        }
-
         self.list_state.scroll_to(saved_scroll);
 
-        if preserve {
+        self.hovered_index = new_hovered_index;
+
+        if let Some(ix) = new_selection {
+            self.selection = Some(ix);
+            self.list_state.scroll_to_reveal_item(ix);
+        } else if preserve {
             if let Some(ix) = self.selection {
                 let next = self.find_next_selectable(ix).or_else(|| {
                     ix.checked_sub(1)
