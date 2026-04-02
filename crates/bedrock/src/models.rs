@@ -1035,4 +1035,15 @@ mod tests {
         assert!(!Model::Llama4Scout17B.supports_caching());
         assert!(!Model::NovaPro.supports_caching());
     }
+
+    #[test]
+    fn test_au_region_model_id_without_global() {
+        let model_id = Model::ClaudeOpus4_6
+            .cross_region_inference_id("ap-southeast-2", false)
+            .expect("should produce a valid model ID");
+        assert_eq!(
+            model_id, "au.anthropic.claude-opus-4-6-v1",
+            "ap-southeast-2 without global should use au. prefix"
+        );
+    }
 }
