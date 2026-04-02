@@ -412,7 +412,8 @@ impl BedrockLanguageModelProvider {
             settings: Some(AllLanguageModelSettings::get_global(cx).bedrock.clone()),
             credentials_from_env: false,
             credentials_provider,
-            _subscription: cx.observe_global::<SettingsStore>(|_, cx| {
+            _subscription: cx.observe_global::<SettingsStore>(|this: &mut State, cx| {
+                this.settings = Some(AllLanguageModelSettings::get_global(cx).bedrock.clone());
                 cx.notify();
             }),
         });
