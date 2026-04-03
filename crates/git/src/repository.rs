@@ -1685,11 +1685,22 @@ impl GitRepository for RealGitRepository {
                 let git = git_binary?;
                 let output = git.build_command(&args).output().await?;
                 if output.status.success() {
-                    Ok(())
-                } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!("git worktree add failed: {stderr}");
+                    return Ok(());
                 }
+                // A post-checkout hook (e.g. Code Defender) can fail with a
+                // non-zero exit code even though the worktree was created
+                // successfully. Check whether the worktree directory actually
+                // exists before reporting failure.
+                if path.exists() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    log::warn!(
+                        "git worktree add succeeded but exited with non-zero status \
+                         (likely a hook failure): {stderr}"
+                    );
+                    return Ok(());
+                }
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("git worktree add failed: {stderr}");
             })
             .boxed()
     }
