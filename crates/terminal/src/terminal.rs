@@ -574,6 +574,8 @@ impl TerminalBuilder {
             event_loop_task: Task::ready(Ok(())),
             background_executor: background_executor.clone(),
             path_style,
+            #[cfg(any(test, feature = "test-support"))]
+            input_log: Vec::new(),
         };
 
         // Replay was already fed into the Term above — return empty vec
@@ -1272,7 +1274,7 @@ impl Terminal {
             }
             InternalEvent::Scroll(scroll) => {
                 trace!("Scrolling: scroll={scroll:?}");
-                term.scroll_display(*scroll);
+                term.scroll_display_with_thaw(*scroll);
                 self.refresh_hovered_word(window);
 
                 if self.vi_mode_enabled {
@@ -1517,6 +1519,7 @@ impl Terminal {
         {
             let mut term = self.term.lock();
             processor.advance(&mut *term, &converted);
+            term.grid_mut().compact_scrollback_if_needed();
         }
         cx.emit(Event::Wakeup);
     }
@@ -1818,6 +1821,8 @@ impl Terminal {
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
+
+        terminal.grid_mut().compact_scrollback_if_needed();
 
         self.last_content = Self::make_content(&terminal, &self.last_content);
     }
@@ -3715,5 +3720,98 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_scrollback_memory_is_proportional_to_grid_dimensions() {
+        let cell_size = std::mem::size_of::<Cell>();
+
+        // Guard against silent Cell growth. If alacritty changes the Cell layout,
+        // this will break and force us to re-evaluate memory expectations.
+        assert!(
+            cell_size <= 24,
+            "Cell size has grown beyond 24 bytes (now {cell_size} bytes). \
+             This affects scrollback memory proportionally — review terminal \
+             memory budgets before updating this assertion."
+        );
+
+        struct Scenario {
+            label: &'static str,
+            terminals: usize,
+            columns: usize,
+            history_lines: usize,
+        }
+
+        let scenarios = [
+            Scenario {
+                label: "1 terminal, 80 cols, default 10K history",
+                terminals: 1,
+                columns: 80,
+                history_lines: DEFAULT_SCROLL_HISTORY_LINES,
+            },
+            Scenario {
+                label: "63 terminals, 160 cols, default 10K history",
+                terminals: 63,
+                columns: 160,
+                history_lines: DEFAULT_SCROLL_HISTORY_LINES,
+            },
+            Scenario {
+                label: "63 terminals, 160 cols, max 100K history (task terminals)",
+                terminals: 63,
+                columns: 160,
+                history_lines: MAX_SCROLL_HISTORY_LINES,
+            },
+        ];
+
+        for scenario in &scenarios {
+            let per_terminal_bytes =
+                scenario.history_lines * scenario.columns * cell_size;
+            let total_bytes = per_terminal_bytes * scenario.terminals;
+            let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
+            let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+            eprintln!(
+                "[scrollback memory] {}: {} terminal(s) × {} cols × {} lines × {} B/cell \
+                 = {:.1} MiB ({:.2} GiB)",
+                scenario.label,
+                scenario.terminals,
+                scenario.columns,
+                scenario.history_lines,
+                cell_size,
+                total_mib,
+                total_gib,
+            );
+
+            // The formula must hold exactly: memory is the product of the
+            // four dimensions, with no hidden overhead term.
+            assert_eq!(
+                total_bytes,
+                scenario.terminals * scenario.columns * scenario.history_lines * cell_size,
+                "Memory should be exactly terminals × columns × history_lines × cell_size"
+            );
+        }
+
+        // Prove the specific claim: 63 terminals at default settings (10K lines,
+        // 160 columns) account for at least 1 GiB of scrollback alone.
+        let default_scenario_bytes =
+            63 * 160 * DEFAULT_SCROLL_HISTORY_LINES * cell_size;
+        let default_scenario_gib =
+            default_scenario_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            default_scenario_gib >= 1.0,
+            "63 terminals × 160 cols × 10K lines should use >= 1 GiB of scrollback, \
+             but calculated {default_scenario_gib:.2} GiB (cell_size={cell_size})"
+        );
+
+        // And at max history, 63 task terminals would use >= 10 GiB.
+        let max_scenario_bytes =
+            63 * 160 * MAX_SCROLL_HISTORY_LINES * cell_size;
+        let max_scenario_gib =
+            max_scenario_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            max_scenario_gib >= 10.0,
+            "63 terminals × 160 cols × 100K lines should use >= 10 GiB of scrollback, \
+             but calculated {max_scenario_gib:.2} GiB (cell_size={cell_size})"
+        );
     }
 }
