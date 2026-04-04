@@ -463,7 +463,7 @@ dependencies = [
 [[package]]
 name = "alacritty_terminal"
 version = "0.25.2-dev"
-source = "git+https://github.com/dsturnbull/alacritty?rev=0b7533a1#0b7533a13e3818ebd6e35771ce39a4e9166a7fd8"
+source = "git+https://github.com/dsturnbull/alacritty?rev=9022d270#9022d2707eee04abb53197e2ee6aa17312a18d15"
 dependencies = [
  "base64 0.22.1",
  "bincode 2.0.1",
@@ -13530,7 +13530,7 @@ dependencies = [
 [[package]]
 name = "pty_host"
 version = "0.1.0"
-source = "git+https://github.com/dsturnbull/pty-host?rev=370b94c#370b94c6904004f44f5bded09b3fcd169f381c84"
+source = "git+https://github.com/dsturnbull/pty-host?rev=d13dd22#d13dd229d7cf7685f4e266a13984f586f3b9c8ad"
 dependencies = [
  "alacritty_terminal",
  "anyhow",

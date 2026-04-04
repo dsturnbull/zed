@@ -2092,9 +2092,9 @@ impl Terminal {
             && e.modifiers.secondary()
             && !self.mouse_mode(e.modifiers.shift)
         {
-            let term_lock = self.term.lock();
+            let mut term_lock = self.term.lock();
             self.mouse_down_hyperlink = terminal_hyperlinks::find_from_grid_point(
-                &term_lock,
+                &mut term_lock,
                 point,
                 &mut self.hyperlink_regex_searches,
                 self.path_style,
@@ -2184,9 +2184,9 @@ impl Terminal {
                 );
 
                 if let Some(mouse_up_hyperlink) = {
-                    let term_lock = self.term.lock();
+                    let mut term_lock = self.term.lock();
                     terminal_hyperlinks::find_from_grid_point(
-                        &term_lock,
+                        &mut term_lock,
                         point,
                         &mut self.hyperlink_regex_searches,
                         self.path_style,
@@ -2296,9 +2296,9 @@ impl Terminal {
     ) -> Task<Vec<RangeInclusive<AlacPoint>>> {
         let term = self.term.clone();
         cx.background_spawn(async move {
-            let term = term.lock();
+            let mut term = term.lock();
 
-            all_search_matches(&term, &mut searcher).collect()
+            all_search_matches(&mut term, &mut searcher).collect()
         })
     }
 
@@ -2669,10 +2669,10 @@ fn make_selection(range: &RangeInclusive<AlacPoint>) -> Selection {
 }
 
 fn all_search_matches<'a, T>(
-    term: &'a Term<T>,
+    term: &'a mut Term<T>,
     regex: &'a mut RegexSearch,
 ) -> impl Iterator<Item = Match> + 'a {
-    let start = AlacPoint::new(term.grid().topmost_line(), Column(0));
+    let start = AlacPoint::new(term.grid().total_topmost_line(), Column(0));
     let end = AlacPoint::new(term.grid().bottommost_line(), term.grid().last_column());
     RegexIter::new(start, end, AlacDirection::Right, term, regex)
 }

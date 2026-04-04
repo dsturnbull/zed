@@ -68,7 +68,7 @@ impl RegexSearches {
 }
 
 pub(super) fn find_from_grid_point<T: EventListener>(
-    term: &Term<T>,
+    term: &mut Term<T>,
     point: AlacPoint,
     regex_searches: &mut RegexSearches,
     path_style: PathStyle,
