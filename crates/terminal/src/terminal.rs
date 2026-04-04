@@ -1519,9 +1519,19 @@ impl Terminal {
         {
             let mut term = self.term.lock();
             processor.advance(&mut *term, &converted);
-            term.grid_mut().compact_scrollback_if_needed();
+            if self.matches.is_empty() {
+                term.grid_mut().compact_scrollback_if_needed();
+            }
         }
         cx.emit(Event::Wakeup);
+    }
+
+    pub fn thaw_compressed_history(&self) {
+        let mut inner = self.term.lock();
+        let compressed = inner.grid().compressed_history_len();
+        if compressed > 0 {
+            inner.grid_mut().thaw_compressed_history(compressed);
+        }
     }
 
     pub fn total_lines(&self) -> usize {
@@ -1822,7 +1832,9 @@ impl Terminal {
             self.process_terminal_event(&e, &mut terminal, window, cx)
         }
 
-        terminal.grid_mut().compact_scrollback_if_needed();
+        if self.matches.is_empty() {
+            terminal.grid_mut().compact_scrollback_if_needed();
+        }
 
         self.last_content = Self::make_content(&terminal, &self.last_content);
     }

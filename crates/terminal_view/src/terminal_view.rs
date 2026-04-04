@@ -1940,8 +1940,17 @@ impl SearchableItem for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal()
-            .update(cx, |term, _| term.matches = matches.to_vec())
+        self.terminal().update(cx, |term, _| {
+            term.matches = matches.to_vec();
+
+            // The background search task thawed all compressed rows before
+            // finding these matches. If sync() ran between then and now, it
+            // may have recompacted some of those rows, invalidating the match
+            // coordinates. Re-thaw so the coordinates are valid again.
+            if !term.matches.is_empty() {
+                term.thaw_compressed_history();
+            }
+        })
     }
 
     /// Returns the selection content to pre-load into this search
