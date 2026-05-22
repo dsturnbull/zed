@@ -10,6 +10,7 @@ use extension::{
     DebugTaskDefinition, ExtensionCapability, ExtensionHostProxy, KeyValueStoreDelegate,
     ProjectDelegate, SlashCommand, SlashCommandArgumentCompletion, SlashCommandOutput, Symbol,
     WorktreeDelegate,
+    frame_buffer::FrameBufferRegistry,
 };
 use fs::Fs;
 use futures::future::LocalBoxFuture;
@@ -55,6 +56,7 @@ pub struct WasmHost {
     pub work_dir: PathBuf,
     /// The capabilities granted to extensions running on the host.
     pub(crate) granted_capabilities: Vec<ExtensionCapability>,
+    pub(crate) frame_buffer_registry: Arc<FrameBufferRegistry>,
     _main_thread_message_task: Task<()>,
     main_thread_message_tx: mpsc::UnboundedSender<MainThreadCall>,
 }
@@ -625,6 +627,7 @@ impl WasmHost {
             proxy,
             release_channel: ReleaseChannel::global(cx),
             granted_capabilities: extension_settings.granted_capabilities.clone(),
+            frame_buffer_registry: Arc::new(FrameBufferRegistry::new()),
             _main_thread_message_task: task,
             main_thread_message_tx: tx,
         })

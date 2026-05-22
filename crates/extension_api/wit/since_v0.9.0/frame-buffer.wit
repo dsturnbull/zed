@@ -1,0 +1,66 @@
+/// A frame buffer interface for extensions to push pixel data to the screen.
+///
+/// Extensions can create frame buffers, write BGRA pixel data into them,
+/// and present them for display in a viewer pane. This enables extensions
+/// to implement custom viewers (PDF, image, video, typst preview) without
+/// compiling rendering logic into the Zed binary.
+interface frame-buffer {
+    /// A frame buffer that holds BGRA pixel data for display.
+    ///
+    /// The buffer uses BGRA byte order (Blue, Green, Red, Alpha) with
+    /// premultiplied alpha, matching GPUI's native pixel format.
+    /// Each pixel is 4 bytes, so a buffer of width W and height H
+    /// requires exactly W * H * 4 bytes of pixel data.
+    resource frame-buffer {
+        /// Creates a new frame buffer with the given dimensions.
+        ///
+        /// The buffer is initialized to transparent black (all zeros).
+        /// Returns an error if width or height is zero, or if allocation fails.
+        create: static func(width: u32, height: u32) -> result<frame-buffer, string>;
+
+        /// Returns the width of the frame buffer in pixels.
+        width: func() -> u32;
+
+        /// Returns the height of the frame buffer in pixels.
+        height: func() -> u32;
+
+        /// Writes BGRA pixel data into the frame buffer at the given byte offset.
+        ///
+        /// The offset and data length are in bytes. Each pixel is 4 bytes (BGRA).
+        /// The data is written linearly into the buffer's pixel storage, where
+        /// pixels are laid out row-by-row from top-left to bottom-right.
+        ///
+        /// Returns an error if the write would exceed the buffer bounds
+        /// (offset + data length > width * height * 4).
+        write: func(offset: u32, data: list<u8>) -> result<_, string>;
+
+        /// Replaces the entire contents of the frame buffer.
+        ///
+        /// The data must be exactly width * height * 4 bytes of BGRA pixel data.
+        /// This is equivalent to `write(0, data)` but may be optimized by the host
+        /// to avoid bounds checking overhead.
+        ///
+        /// Returns an error if the data length does not match the buffer size.
+        replace: func(data: list<u8>) -> result<_, string>;
+
+        /// Presents the current frame buffer contents for display.
+        ///
+        /// This signals to the host that the buffer contents are ready to be
+        /// rendered. The host will snapshot the current pixel data and display
+        /// it in the associated viewer pane. The extension may immediately
+        /// begin writing the next frame after this call returns.
+        ///
+        /// If no viewer pane is currently displaying this buffer, the frame
+        /// is still captured and will be shown when a viewer is opened.
+        present: func() -> result<_, string>;
+
+        /// Resizes the frame buffer to new dimensions.
+        ///
+        /// The pixel data is reset to transparent black (all zeros).
+        /// Any previously presented frame remains visible until the next
+        /// `present` call.
+        ///
+        /// Returns an error if width or height is zero.
+        resize: func(width: u32, height: u32) -> result<_, string>;
+    }
+}

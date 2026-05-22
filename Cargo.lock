@@ -6118,6 +6118,7 @@ dependencies = [
  "gpui",
  "gpui_tokio",
  "http_client",
+ "image",
  "language",
  "language_extension",
  "log",
@@ -6136,6 +6137,7 @@ dependencies = [
  "serde_json",
  "serde_json_lenient",
  "settings",
+ "smallvec",
  "task",
  "telemetry",
  "tempfile",
@@ -6610,6 +6612,16 @@ checksum = "0f158e3ff0a1b334408dc9fb811cd99b446986f4d8b741bb08f9df1604085ae7"
 dependencies = [
  "lazy_static",
  "num",
+]
+
+[[package]]
+name = "frame_buffer_viewer"
+version = "0.1.0"
+dependencies = [
+ "extension",
+ "gpui",
+ "ui",
+ "workspace",
 ]
 
 [[package]]

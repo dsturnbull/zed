@@ -1,0 +1,19 @@
+[package]
+name = "frame_buffer_viewer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/frame_buffer_viewer.rs"
+doctest = false
+
+[dependencies]
+extension.workspace = true
+gpui.workspace = true
+ui.workspace = true
+workspace.workspace = true
