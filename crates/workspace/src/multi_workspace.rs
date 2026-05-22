@@ -49,6 +49,9 @@ actions!(
         NextThread,
         /// Activates the previous thread in sidebar order.
         PreviousThread,
+        /// Activates the next thread that has unread notifications
+        /// (completed while not active).
+        NextUnreadThread,
         /// Creates a new thread in the current workspace.
         NewThread,
         /// Moves the active project to a new window.
@@ -140,6 +143,10 @@ pub trait Sidebar: Focusable + Render + EventEmitter<SidebarEvent> + Sized {
     /// Activates the next or previous thread in sidebar order.
     fn cycle_thread(&mut self, _forward: bool, _window: &mut Window, _cx: &mut Context<Self>) {}
 
+    /// Activates the next thread that has unread notifications (i.e. completed
+    /// while not active). Cycles forward only.
+    fn cycle_to_next_unread_thread(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {}
+
     /// Return an opaque JSON blob of sidebar-specific state to persist.
     fn serialized_state(&self, _cx: &App) -> Option<String> {
         None
@@ -167,6 +174,7 @@ pub trait SidebarHandle: 'static + Send + Sync {
     fn toggle_thread_switcher(&self, select_last: bool, window: &mut Window, cx: &mut App);
     fn cycle_project(&self, forward: bool, window: &mut Window, cx: &mut App);
     fn cycle_thread(&self, forward: bool, window: &mut Window, cx: &mut App);
+    fn cycle_to_next_unread_thread(&self, window: &mut Window, cx: &mut App);
 
     fn is_threads_list_view_active(&self, cx: &App) -> bool;
 
@@ -241,6 +249,15 @@ impl<T: Sidebar> SidebarHandle for Entity<T> {
         window.defer(cx, move |window, cx| {
             entity.update(cx, |this, cx| {
                 this.cycle_thread(forward, window, cx);
+            });
+        });
+    }
+
+    fn cycle_to_next_unread_thread(&self, window: &mut Window, cx: &mut App) {
+        let entity = self.clone();
+        window.defer(cx, move |window, cx| {
+            entity.update(cx, |this, cx| {
+                this.cycle_to_next_unread_thread(window, cx);
             });
         });
     }
@@ -2183,6 +2200,13 @@ impl Render for MultiWorkspace {
                             }
                         }),
                     )
+                    .on_action(cx.listener(
+                        |this: &mut Self, _: &NextUnreadThread, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.cycle_to_next_unread_thread(window, cx);
+                            }
+                        },
+                    ))
                     .when(self.project_group_keys().len() >= 2, |el| {
                         el.on_action(cx.listener(
                             |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {

@@ -6353,6 +6353,97 @@ impl Sidebar {
         self.cycle_thread_impl(true, window, cx);
     }
 
+    fn cycle_to_next_unread_thread_impl(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Entries with unread notifications: agent threads that
+        // completed while not active, or terminals that received a
+        // bell / equivalent notification.
+        let unread_indices: Vec<usize> = self
+            .contents
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, entry)| match entry {
+                ListEntry::Thread(thread)
+                    if self
+                        .contents
+                        .notified_threads
+                        .contains(&thread.metadata.thread_id) =>
+                {
+                    Some(ix)
+                }
+                ListEntry::Terminal(terminal)
+                    if self
+                        .contents
+                        .notified_terminals
+                        .contains(&terminal.metadata.terminal_id) =>
+                {
+                    Some(ix)
+                }
+                _ => None,
+            })
+            .collect();
+
+        if unread_indices.is_empty() {
+            return;
+        }
+
+        // Pick the first unread entry strictly after the current cursor
+        // position. If the cursor is on an unread entry itself, this
+        // jumps to the *next* one. If no current cursor or none after,
+        // wrap to the first unread.
+        let current_entry_pos = self.active_entry.as_ref().and_then(|active| {
+            self.contents
+                .entries
+                .iter()
+                .position(|entry| active.matches_entry(entry))
+        });
+
+        let target_ix = match current_entry_pos {
+            Some(pos) => unread_indices
+                .iter()
+                .find(|&&ix| ix > pos)
+                .copied()
+                .unwrap_or(unread_indices[0]),
+            None => unread_indices[0],
+        };
+
+        match &self.contents.entries[target_ix] {
+            ListEntry::Thread(thread) => {
+                let metadata = thread.metadata.clone();
+                match &thread.workspace {
+                    ThreadEntryWorkspace::Open(workspace) => {
+                        let workspace = workspace.clone();
+                        self.activate_thread(metadata, &workspace, true, window, cx);
+                    }
+                    ThreadEntryWorkspace::Closed {
+                        folder_paths,
+                        project_group_key,
+                    } => {
+                        let folder_paths = folder_paths.clone();
+                        let project_group_key = project_group_key.clone();
+                        self.open_workspace_and_activate_thread(
+                            metadata,
+                            folder_paths,
+                            &project_group_key,
+                            window,
+                            cx,
+                        );
+                    }
+                }
+            }
+            ListEntry::Terminal(terminal) => {
+                let metadata = terminal.metadata.clone();
+                let workspace = terminal.workspace.clone();
+                self.activate_terminal_entry(metadata, workspace, true, window, cx);
+            }
+            ListEntry::ProjectHeader { .. } => {}
+        }
+    }
+
     fn on_previous_thread(
         &mut self,
         _: &PreviousThread,
@@ -6894,6 +6985,10 @@ impl WorkspaceSidebar for Sidebar {
 
     fn cycle_thread(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.cycle_thread_impl(forward, window, cx);
+    }
+
+    fn cycle_to_next_unread_thread(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.cycle_to_next_unread_thread_impl(window, cx);
     }
 
     fn serialized_state(&self, _cx: &App) -> Option<String> {
