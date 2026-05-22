@@ -308,6 +308,45 @@ impl Project {
         self.create_terminal_shell_internal(working_directory, true, cx)
     }
 
+    /// Reattach to an existing pty-host session by ID.
+    ///
+    /// Returns Err if the session's socket is missing or refuses connection
+    /// (typically because the daemon was killed). The caller should fall
+    /// back to spawning a fresh shell in that case.
+    pub fn reattach_terminal_shell(
+        &mut self,
+        session_id: uuid::Uuid,
+        cx: &mut Context<Self>,
+    ) -> Result<Entity<Terminal>> {
+        let settings_location = None;
+        let settings = TerminalSettings::get(settings_location, cx).clone();
+        let path_style = self.path_style(cx);
+        let socket_path = pty_host::socket_path_for_session(&session_id);
+        if !socket_path.exists() {
+            anyhow::bail!(
+                "pty-host session {session_id} socket missing at {}",
+                socket_path.display()
+            );
+        }
+        log::info!(
+            "reattach_terminal_shell: reconnecting to pty-host session {session_id} \
+             at {}",
+            socket_path.display()
+        );
+        let (builder, _snapshot_data) = TerminalBuilder::from_pty_host(
+            session_id,
+            &socket_path,
+            settings.cursor_shape,
+            settings.alternate_scroll,
+            settings.max_scroll_history_lines,
+            &cx.background_executor(),
+            path_style,
+        )?;
+        let terminal = cx.new(|cx| builder.subscribe(cx));
+        self.terminals.local_handles.push(terminal.downgrade());
+        Ok(terminal)
+    }
+
     /// Internal method for creating terminal shells.
     /// If force_local is true, creates a local terminal even if the project has a remote client.
     /// This allows "breaking out" to a local shell in remote projects.
@@ -397,37 +436,95 @@ impl Project {
             .await
             .unwrap_or_default();
 
-            let builder = project
-                .update(cx, move |_, cx| {
-                    let (shell, env) = {
-                        match remote_client {
-                            Some(remote_client) => {
-                                create_remote_shell(None, env, path, remote_client, cx)?
-                            }
-                            None => (settings.shell, env),
+            // Decide whether to use pty-host (local interactive shells) or
+            // direct PTY allocation (remote shells, tasks).
+            let use_pty_host = !is_via_remote && cfg!(unix);
+            let (terminal_builder, snapshot_data) = if use_pty_host {
+                // Spawn a pty-host session for local interactive terminals.
+                let session_id = uuid::Uuid::new_v4();
+                let env_for_host = env.clone();
+
+                let (shell_program, shell_args) = project.update(cx, move |_, cx| {
+                    let shell = match remote_client {
+                        Some(remote_client) => {
+                            create_remote_shell(None, env.clone(), path.clone(), remote_client, cx)?.0
                         }
+                        None => settings.shell.clone(),
                     };
-                    anyhow::Ok(TerminalBuilder::new(
-                        local_path.map(|path| path.to_path_buf()),
-                        None,
-                        shell,
-                        env,
+                    anyhow::Ok(match shell {
+                        task::Shell::System => (None, vec![]),
+                        task::Shell::Program(p) => (Some(p), vec![]),
+                        task::Shell::WithArguments { program, args, .. } => (Some(program), args),
+                    })
+                })??;
+
+                let mut host_env = env_for_host;
+                terminal::insert_zed_terminal_env(&mut host_env, &"0.0.0");
+
+                let socket_path = pty_host::spawn_host(&pty_host::SpawnConfig {
+                    session_id,
+                    shell_program,
+                    shell_args,
+                    working_directory: local_path.as_deref().map(|p| p.to_path_buf()),
+                    env: host_env.into_iter().collect(),
+                })?;
+
+                log::info!(
+                    "create_terminal_shell: connecting to pty-host session {session_id} \
+                     at {}",
+                    socket_path.display()
+                );
+                project.update(cx, move |_, cx| {
+                    TerminalBuilder::from_pty_host(
+                        session_id,
+                        &socket_path,
                         settings.cursor_shape,
                         settings.alternate_scroll,
                         settings.max_scroll_history_lines,
-                        settings.path_hyperlink_regexes,
-                        settings.path_hyperlink_timeout_ms,
-                        is_via_remote,
-                        cx.entity_id().as_u64(),
-                        None,
-                        cx,
-                        activation_script,
+                        &cx.background_executor(),
                         path_style,
-                    ))
+                    )
                 })??
-                .await?;
+            } else {
+                // Direct PTY allocation for remote shells and tasks.
+                log::info!(
+                    "create_terminal_shell: using direct PTY (remote or non-unix)"
+                );
+                let builder = project
+                    .update(cx, move |_, cx| {
+                        let (shell, env) = {
+                            match remote_client {
+                                Some(remote_client) => {
+                                    create_remote_shell(None, env, path, remote_client, cx)?
+                                }
+                                None => (settings.shell, env),
+                            }
+                        };
+                        anyhow::Ok(TerminalBuilder::new(
+                            local_path.map(|path| path.to_path_buf()),
+                            None,
+                            shell,
+                            env,
+                            settings.cursor_shape,
+                            settings.alternate_scroll,
+                            settings.max_scroll_history_lines,
+                            settings.path_hyperlink_regexes,
+                            settings.path_hyperlink_timeout_ms,
+                            is_via_remote,
+                            cx.entity_id().as_u64(),
+                            None,
+                            cx,
+                            activation_script,
+                            path_style,
+                        ))
+                    })??
+                    .await?;
+                (builder, Vec::new())
+            };
+
+            let _ = snapshot_data; // already fed through VTE parser in from_pty_host()
             project.update(cx, move |this, cx| {
-                let terminal_handle = cx.new(|cx| builder.subscribe(cx));
+                let terminal_handle = cx.new(|cx| terminal_builder.subscribe(cx));
 
                 this.terminals
                     .local_handles

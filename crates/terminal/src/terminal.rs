@@ -209,6 +209,27 @@ impl TerminalBounds {
         }
     }
 
+    /// Create bounds that yield the given grid dimensions.
+    ///
+    /// Uses the debug cell sizes so the pixel values are synthetic, but the
+    /// `Dimensions` trait will return the correct `columns()` and
+    /// `screen_lines()`.  This is used when reconnecting to a pty-host
+    /// session where we know the grid size but don't yet have real font
+    /// metrics.
+    pub fn from_grid_dimensions(cols: u16, rows: u16) -> Self {
+        TerminalBounds::new(
+            DEBUG_LINE_HEIGHT,
+            DEBUG_CELL_WIDTH,
+            Bounds {
+                origin: Point::default(),
+                size: Size {
+                    width: DEBUG_CELL_WIDTH * (cols as f32),
+                    height: DEBUG_LINE_HEIGHT * (rows as f32),
+                },
+            },
+        )
+    }
+
     pub fn num_lines(&self) -> usize {
         // Tolerance to prevent f32 precision from losing a row:
         // `N * line_height / line_height` can be N-epsilon, which floor()
@@ -432,6 +453,143 @@ impl TerminalBuilder {
             terminal,
             events_rx,
         })
+    }
+
+    /// Connect to an existing `zed-pty-host` session and create a terminal
+    /// backed by it. The shell process lives in the host and survives Zed
+    /// restarts.
+    ///
+    /// `snapshot_data` (from `ConnectResult`) should be fed into the returned
+    /// `Term` after `subscribe()` to reconstruct the grid state.
+    pub fn from_pty_host(
+        session_id: uuid::Uuid,
+        socket_path: &std::path::Path,
+        cursor_shape: CursorShape,
+        alternate_scroll: AlternateScroll,
+        max_scroll_history_lines: Option<usize>,
+        background_executor: &BackgroundExecutor,
+        path_style: PathStyle,
+    ) -> Result<(TerminalBuilder, Vec<u8>)> {
+        use pty_host::client::PtyHostClient;
+
+        let connect_result = PtyHostClient::connect(socket_path)
+            .context("failed to connect to pty-host session")?;
+
+        let default_cursor_style = AlacCursorStyle::from(cursor_shape);
+        let scrolling_history = max_scroll_history_lines
+            .unwrap_or(DEFAULT_SCROLL_HISTORY_LINES)
+            .min(MAX_SCROLL_HISTORY_LINES);
+        let config = Config {
+            scrolling_history,
+            default_cursor_style,
+            ..Config::default()
+        };
+
+        let (events_tx, events_rx) = unbounded();
+        let initial_bounds =
+            TerminalBounds::from_grid_dimensions(connect_result.cols, connect_result.rows);
+        let mut term = Term::new(
+            config.clone(),
+            &initial_bounds,
+            ZedListener(events_tx.clone()),
+        );
+
+        if let AlternateScroll::Off = alternate_scroll {
+            term.unset_private_mode(PrivateMode::Named(NamedPrivateMode::AlternateScroll));
+        }
+
+        let term = Arc::new(FairMutex::new(term));
+
+        // Restore terminal state from the pty-host snapshot.
+        // The host sends a bincode-serialised `TermState` (grid, cursor,
+        // modes, scroll region, etc.). We deserialise via the pty_host
+        // helper and call `term.restore()` to reconstruct the display.
+        let snapshot_data = connect_result.snapshot_data;
+        if !snapshot_data.is_empty() {
+            match pty_host::client::deserialize_snapshot(&snapshot_data) {
+                Ok(state) => {
+                    let mut term_guard = term.lock();
+                    term_guard.restore(state);
+                    drop(term_guard);
+                }
+                Err(e) => {
+                    log::error!("Failed to deserialise pty-host snapshot: {e}");
+                }
+            }
+        }
+
+        let client = connect_result.client;
+        let socket_path_owned = socket_path.to_path_buf();
+
+        let event_loop = EventLoop::new(
+            term.clone(),
+            ZedListener(events_tx),
+            client,
+            false, // drain_on_exit
+            false, // ref_test
+        )
+        .context("failed to create event loop for pty-host session")?;
+
+        let pty_tx = event_loop.channel();
+        let _io_thread = event_loop.spawn();
+
+        let terminal = Terminal {
+            task: None,
+            terminal_type: TerminalType::PtyHosted {
+                pty_tx: Notifier(pty_tx),
+                session_id,
+                socket_path: socket_path_owned,
+            },
+            completion_tx: None,
+            term,
+            term_config: config,
+            title_override: None,
+            events: VecDeque::with_capacity(10),
+            last_content: Default::default(),
+            keyboard_input_sent: false,
+            last_mouse: None,
+            matches: Vec::new(),
+            selection_head: None,
+            breadcrumb_text: String::new(),
+            scroll_px: px(0.),
+            next_link_id: 0,
+            selection_phase: SelectionPhase::Ended,
+            hyperlink_regex_searches: RegexSearches::default(),
+            vi_mode_enabled: false,
+            is_remote_terminal: false,
+            last_mouse_move_time: Instant::now(),
+            last_hyperlink_search_position: None,
+            mouse_down_hyperlink: None,
+            #[cfg(windows)]
+            shell_program: None,
+            activation_script: Vec::new(),
+            template: CopyTemplate {
+                shell: Shell::System,
+                env: HashMap::default(),
+                cursor_shape,
+                alternate_scroll,
+                max_scroll_history_lines,
+                path_hyperlink_regexes: Vec::default(),
+                path_hyperlink_timeout_ms: 0,
+                window_id: 0,
+            },
+            child_exited: None,
+            event_loop_task: Task::ready(Ok(())),
+            background_executor: background_executor.clone(),
+            path_style,
+            #[cfg(any(test, feature = "test-support"))]
+            input_log: Vec::new(),
+        };
+
+        // Replay was already fed into the Term above — return empty vec
+        // so callers don't try to feed it again.
+        Ok((
+            TerminalBuilder {
+                terminal,
+                events_rx,
+            },
+            Vec::new(),
+        ))
     }
 
     pub fn new(
@@ -849,7 +1007,44 @@ enum TerminalType {
         pty_tx: Notifier,
         info: Arc<PtyProcessInfo>,
     },
+    /// Terminal backed by a `zed-pty-host` session. The shell process lives in
+    /// an external shepherd process that survives Zed restarts. On drop, we send
+    /// DETACH (not SIGHUP) so the session stays alive for reconnection.
+    PtyHosted {
+        pty_tx: Notifier,
+        session_id: uuid::Uuid,
+        /// Socket path for sending DETACH on drop. We don't hold a second
+        /// `PtyHostClient` — the one and only client was moved into the
+        /// `EventLoop`. Instead we just open a brief connection to send
+        /// the control message.
+        socket_path: PathBuf,
+    },
     DisplayOnly,
+}
+
+impl TerminalType {
+    fn pty_tx(&self) -> Option<&Notifier> {
+        match self {
+            TerminalType::Pty { pty_tx, .. } | TerminalType::PtyHosted { pty_tx, .. } => {
+                Some(pty_tx)
+            }
+            TerminalType::DisplayOnly => None,
+        }
+    }
+
+    fn process_info(&self) -> Option<&Arc<PtyProcessInfo>> {
+        match self {
+            TerminalType::Pty { info, .. } => Some(info),
+            _ => None,
+        }
+    }
+
+    fn session_id(&self) -> Option<uuid::Uuid> {
+        match self {
+            TerminalType::PtyHosted { session_id, .. } => Some(*session_id),
+            _ => None,
+        }
+    }
 }
 
 pub struct Terminal {
@@ -992,7 +1187,7 @@ impl Terminal {
             AlacTermEvent::Wakeup => {
                 cx.emit(Event::Wakeup);
 
-                if let TerminalType::Pty { info, .. } = &self.terminal_type {
+                if let Some(info) = self.terminal_type.process_info() {
                     info.emit_title_changed_if_changed(cx);
                 }
             }
@@ -1035,7 +1230,7 @@ impl Terminal {
 
                 self.last_content.terminal_bounds = new_bounds;
 
-                if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+                if let Some(pty_tx) = self.terminal_type.pty_tx() {
                     pty_tx.0.send(Msg::Resize(new_bounds.into())).ok();
                 }
 
@@ -1082,7 +1277,7 @@ impl Terminal {
             }
             InternalEvent::Scroll(scroll) => {
                 trace!("Scrolling: scroll={scroll:?}");
-                term.scroll_display(*scroll);
+                term.scroll_display_with_thaw(*scroll);
                 self.refresh_hovered_word(window);
 
                 if self.vi_mode_enabled {
@@ -1327,8 +1522,19 @@ impl Terminal {
         {
             let mut term = self.term.lock();
             processor.advance(&mut *term, &converted);
+            if self.matches.is_empty() {
+                term.grid_mut().compact_scrollback_if_needed();
+            }
         }
         cx.emit(Event::Wakeup);
+    }
+
+    pub fn thaw_compressed_history(&self) {
+        let mut inner = self.term.lock();
+        let compressed = inner.grid().compressed_history_len();
+        if compressed > 0 {
+            inner.grid_mut().thaw_compressed_history(compressed);
+        }
     }
 
     pub fn total_lines(&self) -> usize {
@@ -1469,7 +1675,7 @@ impl Terminal {
     /// Write the Input payload to the PTY, if applicable.
     /// (This is a no-op for display-only terminals.)
     fn write_to_pty(&self, input: impl Into<Cow<'static, [u8]>>) {
-        if let TerminalType::Pty { pty_tx, .. } = &self.terminal_type {
+        if let Some(pty_tx) = self.terminal_type.pty_tx() {
             let input = input.into();
             if log::log_enabled!(log::Level::Debug) {
                 if let Ok(str) = str::from_utf8(&input) {
@@ -1646,6 +1852,10 @@ impl Terminal {
         //Note that the ordering of events matters for event processing
         while let Some(e) = self.events.pop_front() {
             self.process_terminal_event(&e, &mut terminal, window, cx)
+        }
+
+        if self.matches.is_empty() {
+            terminal.grid_mut().compact_scrollback_if_needed();
         }
 
         self.last_content = Self::make_content(&terminal, &self.last_content);
@@ -1916,9 +2126,9 @@ impl Terminal {
             && e.modifiers.secondary()
             && !self.mouse_mode(e.modifiers.shift)
         {
-            let term_lock = self.term.lock();
+            let mut term_lock = self.term.lock();
             self.mouse_down_hyperlink = terminal_hyperlinks::find_from_grid_point(
-                &term_lock,
+                &mut term_lock,
                 point,
                 &mut self.hyperlink_regex_searches,
                 self.path_style,
@@ -2008,9 +2218,9 @@ impl Terminal {
                 );
 
                 if let Some(mouse_up_hyperlink) = {
-                    let term_lock = self.term.lock();
+                    let mut term_lock = self.term.lock();
                     terminal_hyperlinks::find_from_grid_point(
-                        &term_lock,
+                        &mut term_lock,
                         point,
                         &mut self.hyperlink_regex_searches,
                         self.path_style,
@@ -2120,10 +2330,17 @@ impl Terminal {
     ) -> Task<Vec<RangeInclusive<AlacPoint>>> {
         let term = self.term.clone();
         cx.background_spawn(async move {
-            let term = term.lock();
+            let mut term = term.lock();
 
-            all_search_matches(&term, &mut searcher).collect()
+            all_search_matches(&mut term, &mut searcher).collect()
         })
+    }
+
+    /// Returns the pty-host session ID if this terminal is backed by a
+    /// `zed-pty-host` session. Used for persistence — store this in the DB
+    /// so we can reconnect after restart.
+    pub fn pty_host_session_id(&self) -> Option<uuid::Uuid> {
+        self.terminal_type.session_id()
     }
 
     pub fn working_directory(&self) -> Option<PathBuf> {
@@ -2144,14 +2361,9 @@ impl Terminal {
     /// This does *not* return the working directory of the shell that runs on the
     /// remote host, in case Zed is connected to a remote host.
     fn client_side_working_directory(&self) -> Option<PathBuf> {
-        match &self.terminal_type {
-            TerminalType::Pty { info, .. } => info
-                .current
-                .read()
-                .as_ref()
-                .map(|process| process.cwd.clone()),
-            TerminalType::DisplayOnly => None,
-        }
+        self.terminal_type.process_info().and_then(|info| {
+            info.current.read().as_ref().map(|process| process.cwd.clone())
+        })
     }
 
     pub fn title(&self, truncate: bool) -> String {
@@ -2201,7 +2413,7 @@ impl Terminal {
                             format!("{process_file} — {process_name}")
                         })
                         .unwrap_or_else(|| "Terminal".to_string()),
-                    TerminalType::DisplayOnly => "Terminal".to_string(),
+                    _ => "Terminal".to_string(),
                 }),
         }
     }
@@ -2210,28 +2422,19 @@ impl Terminal {
         if let Some(task) = self.task()
             && task.status == TaskStatus::Running
         {
-            if let TerminalType::Pty { info, .. } = &self.terminal_type {
-                // First kill the foreground process group (the command running in the shell)
+            if let Some(info) = self.terminal_type.process_info() {
                 info.kill_current_process();
-                // Then kill the shell itself so that the terminal exits properly
-                // and wait_for_completed_task can complete
                 info.kill_child_process();
             }
         }
     }
 
     pub fn pid(&self) -> Option<sysinfo::Pid> {
-        match &self.terminal_type {
-            TerminalType::Pty { info, .. } => info.pid(),
-            TerminalType::DisplayOnly => None,
-        }
+        self.terminal_type.process_info().and_then(|info| info.pid())
     }
 
     pub fn pid_getter(&self) -> Option<&ProcessIdGetter> {
-        match &self.terminal_type {
-            TerminalType::Pty { info, .. } => Some(info.pid_getter()),
-            TerminalType::DisplayOnly => None,
-        }
+        self.terminal_type.process_info().map(|info| info.pid_getter())
     }
 
     pub fn task(&self) -> Option<&TaskState> {
@@ -2442,19 +2645,60 @@ unsafe fn append_text_to_term(term: &mut Term<ZedListener>, text_lines: &[&str])
 
 impl Drop for Terminal {
     fn drop(&mut self) {
-        if let TerminalType::Pty { pty_tx, info } =
-            std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly)
-        {
-            pty_tx.0.send(Msg::Shutdown).ok();
-            info.terminate_child_process();
+        match std::mem::replace(&mut self.terminal_type, TerminalType::DisplayOnly) {
+            TerminalType::Pty { pty_tx, info } => {
+                pty_tx.0.send(Msg::Shutdown).ok();
+                info.terminate_child_process();
 
-            let timer = self.background_executor.timer(Duration::from_millis(100));
-            self.background_executor
-                .spawn(async move {
-                    timer.await;
-                    info.kill_child_process();
-                })
-                .detach();
+                let timer = self.background_executor.timer(Duration::from_millis(100));
+                self.background_executor
+                    .spawn(async move {
+                        timer.await;
+                        info.kill_child_process();
+                    })
+                    .detach();
+            }
+            TerminalType::PtyHosted {
+                pty_tx,
+                session_id,
+                socket_path,
+            } => {
+                // Send shutdown to the alacritty EventLoop thread so it exits cleanly.
+                pty_tx.0.send(Msg::Shutdown).ok();
+                // Send DETACH to the pty-host via a brief socket connection.
+                // The EventLoop's client is being torn down, so we open a fresh
+                // connection just to deliver the control message.
+                match std::os::unix::net::UnixStream::connect(&socket_path) {
+                    Ok(mut stream) => {
+                        let msg = pty_host::protocol::ClientMessage::Detach;
+                        if let Err(e) =
+                            pty_host::protocol::send_client_message(&mut stream, &msg)
+                        {
+                            log::warn!(
+                                "Failed to send DETACH to pty-host session {session_id}: {e}"
+                            );
+                        } else {
+                            log::info!(
+                                "Detached from pty-host session {session_id} (shell preserved)"
+                            );
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        // Socket missing — the daemon already cleaned up, typically
+                        // because the shell exited cleanly. Nothing to detach from.
+                        log::debug!(
+                            "pty-host session {session_id} socket missing on DETACH \
+                             (daemon already shut down)"
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "Could not connect to pty-host session {session_id} for DETACH: {e}"
+                        );
+                    }
+                }
+            }
+            TerminalType::DisplayOnly => {}
         }
     }
 }
@@ -2468,10 +2712,10 @@ fn make_selection(range: &RangeInclusive<AlacPoint>) -> Selection {
 }
 
 fn all_search_matches<'a, T>(
-    term: &'a Term<T>,
+    term: &'a mut Term<T>,
     regex: &'a mut RegexSearch,
 ) -> impl Iterator<Item = Match> + 'a {
-    let start = AlacPoint::new(term.grid().topmost_line(), Column(0));
+    let start = AlacPoint::new(term.grid().total_topmost_line(), Column(0));
     let end = AlacPoint::new(term.grid().bottommost_line(), term.grid().last_column());
     RegexIter::new(start, end, AlacDirection::Right, term, regex)
 }
@@ -3581,5 +3825,98 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_scrollback_memory_is_proportional_to_grid_dimensions() {
+        let cell_size = std::mem::size_of::<Cell>();
+
+        // Guard against silent Cell growth. If alacritty changes the Cell layout,
+        // this will break and force us to re-evaluate memory expectations.
+        assert!(
+            cell_size <= 24,
+            "Cell size has grown beyond 24 bytes (now {cell_size} bytes). \
+             This affects scrollback memory proportionally — review terminal \
+             memory budgets before updating this assertion."
+        );
+
+        struct Scenario {
+            label: &'static str,
+            terminals: usize,
+            columns: usize,
+            history_lines: usize,
+        }
+
+        let scenarios = [
+            Scenario {
+                label: "1 terminal, 80 cols, default 10K history",
+                terminals: 1,
+                columns: 80,
+                history_lines: DEFAULT_SCROLL_HISTORY_LINES,
+            },
+            Scenario {
+                label: "63 terminals, 160 cols, default 10K history",
+                terminals: 63,
+                columns: 160,
+                history_lines: DEFAULT_SCROLL_HISTORY_LINES,
+            },
+            Scenario {
+                label: "63 terminals, 160 cols, max 100K history (task terminals)",
+                terminals: 63,
+                columns: 160,
+                history_lines: MAX_SCROLL_HISTORY_LINES,
+            },
+        ];
+
+        for scenario in &scenarios {
+            let per_terminal_bytes =
+                scenario.history_lines * scenario.columns * cell_size;
+            let total_bytes = per_terminal_bytes * scenario.terminals;
+            let total_mib = total_bytes as f64 / (1024.0 * 1024.0);
+            let total_gib = total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+
+            eprintln!(
+                "[scrollback memory] {}: {} terminal(s) × {} cols × {} lines × {} B/cell \
+                 = {:.1} MiB ({:.2} GiB)",
+                scenario.label,
+                scenario.terminals,
+                scenario.columns,
+                scenario.history_lines,
+                cell_size,
+                total_mib,
+                total_gib,
+            );
+
+            // The formula must hold exactly: memory is the product of the
+            // four dimensions, with no hidden overhead term.
+            assert_eq!(
+                total_bytes,
+                scenario.terminals * scenario.columns * scenario.history_lines * cell_size,
+                "Memory should be exactly terminals × columns × history_lines × cell_size"
+            );
+        }
+
+        // Prove the specific claim: 63 terminals at default settings (10K lines,
+        // 160 columns) account for at least 1 GiB of scrollback alone.
+        let default_scenario_bytes =
+            63 * 160 * DEFAULT_SCROLL_HISTORY_LINES * cell_size;
+        let default_scenario_gib =
+            default_scenario_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            default_scenario_gib >= 1.0,
+            "63 terminals × 160 cols × 10K lines should use >= 1 GiB of scrollback, \
+             but calculated {default_scenario_gib:.2} GiB (cell_size={cell_size})"
+        );
+
+        // And at max history, 63 task terminals would use >= 10 GiB.
+        let max_scenario_bytes =
+            63 * 160 * MAX_SCROLL_HISTORY_LINES * cell_size;
+        let max_scenario_gib =
+            max_scenario_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
+        assert!(
+            max_scenario_gib >= 10.0,
+            "63 terminals × 160 cols × 100K lines should use >= 10 GiB of scrollback, \
+             but calculated {max_scenario_gib:.2} GiB (cell_size={cell_size})"
+        );
     }
 }

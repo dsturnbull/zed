@@ -157,6 +157,7 @@ members = [
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
+    "crates/pty_host_bin",
     "crates/project_symbols",
     "crates/prompt_store",
     "crates/proto",
@@ -429,6 +430,9 @@ remote_connection = { path = "crates/remote_connection" }
 remote_server = { path = "crates/remote_server" }
 repl = { path = "crates/repl" }
 reqwest_client = { path = "crates/reqwest_client" }
+
+pty_host = { git = "https://github.com/dsturnbull/pty-host", rev = "ac0880b" }
+pty_host_bin = { path = "crates/pty_host_bin" }
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "e50e726ddd0292f6ef9de0dda6b90af4ed1fb66a", features = ["wav", "playback", "wav_output", "recording"] }
 rope = { path = "crates/rope" }
 rpc = { path = "crates/rpc" }
@@ -504,7 +508,7 @@ ztracing_macro = { path = "crates/ztracing_macro" }
 
 agent-client-protocol = { version = "=0.12.1", features = ["unstable"] }
 aho-corasick = "1.1"
-alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "9d9640d4" }
+alacritty_terminal = { git = "https://github.com/dsturnbull/alacritty", rev = "30f7f4fd" }
 any_vec = "0.14"
 anyhow = "1.0.86"
 ashpd = { version = "0.13", default-features = false, features = [
@@ -881,7 +885,13 @@ features = [
     "Win32_Media",
 ]
 
+
+
 [patch.crates-io]
+# Force pty_host's transitive alacritty_terminal "0.25" dependency to
+# use our dsturnbull/alacritty fork — pty_host's own [patch.crates-io]
+# is ignored when pty_host is consumed as a git dependency.
+alacritty_terminal = { git = "https://github.com/dsturnbull/alacritty", rev = "30f7f4fd" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 notify = { git = "https://github.com/zed-industries/notify.git", rev = "ce58c24cad542c28e04ced02e20325a4ec28a31d" }
 notify-types = { git = "https://github.com/zed-industries/notify.git", rev = "ce58c24cad542c28e04ced02e20325a4ec28a31d" }

@@ -196,6 +196,18 @@ fn main() {
     #[cfg(unix)]
     util::prevent_root_execution();
 
+    // When Zed spawns itself as a pty-host daemon (e.g. `zed pty-host
+    // --session <UUID> ...`), handle it before clap parsing so the
+    // daemon-specific flags don't confuse the normal Args parser.
+    #[cfg(unix)]
+    {
+        let raw_args: Vec<String> = std::env::args().collect();
+        if raw_args.get(1).map(|s| s.as_str()) == Some("pty-host") {
+            pty_host::daemon::main_with_args(raw_args[2..].to_vec());
+            return;
+        }
+    }
+
     let args = Args::parse();
 
     // `zed --askpass` Makes zed operate in nc/netcat mode for use with askpass

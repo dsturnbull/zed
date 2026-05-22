@@ -247,6 +247,14 @@ impl TerminalView {
         );
         let cursor_shape = TerminalSettings::get_global(cx).cursor_shape;
 
+        let has_pty_host_session = terminal.read(cx).pty_host_session_id().is_some();
+        if has_pty_host_session {
+            log::info!(
+                "TerminalView::new: terminal has pty-host session {:?}, will serialize immediately",
+                terminal.read(cx).pty_host_session_id()
+            );
+        }
+
         let scroll_handle = TerminalScrollHandle::new(terminal.read(cx));
 
         let blink_manager = cx.new(|cx| {
@@ -287,7 +295,7 @@ impl TerminalView {
             block_below_cursor: None,
             scroll_top: Pixels::ZERO,
             scroll_handle,
-            needs_serialize: false,
+            needs_serialize: has_pty_host_session,
             custom_title: None,
             ime_state: None,
             self_handle: cx.entity().downgrade(),
@@ -1770,6 +1778,9 @@ impl SerializableItem for TerminalView {
         let workspace_id = self.workspace_id?;
         let cwd = terminal.working_directory();
         let custom_title = self.custom_title.clone();
+        let session_id = terminal
+            .pty_host_session_id()
+            .map(|id| id.to_string());
         self.needs_serialize = false;
 
         let db = TerminalDb::global(cx);
@@ -1780,6 +1791,13 @@ impl SerializableItem for TerminalView {
             }
             db.save_custom_title(item_id, workspace_id, custom_title)
                 .await?;
+            db
+                .save_session_id(item_id, workspace_id, session_id.clone())
+                .await?;
+            log::info!(
+                "TerminalView::serialize: persisted session_id={session_id:?} for \
+                 item_id={item_id:?}"
+            );
             Ok(())
         }))
     }
@@ -1797,7 +1815,7 @@ impl SerializableItem for TerminalView {
         cx: &mut App,
     ) -> Task<anyhow::Result<Entity<Self>>> {
         window.spawn(cx, async move |cx| {
-            let (cwd, custom_title) = cx
+            let (cwd, custom_title, session_id) = cx
                 .update(|_window, cx| {
                     let db = TerminalDb::global(cx);
                     let from_db = db
@@ -1819,11 +1837,95 @@ impl SerializableItem for TerminalView {
                         .log_err()
                         .flatten()
                         .filter(|title| !title.trim().is_empty());
-                    (cwd, custom_title)
+                    let session_id = db
+                        .get_session_id(item_id, workspace_id)
+                        .log_err()
+                        .flatten()
+                        .and_then(|s| uuid::Uuid::parse_str(&s).ok());
+                    log::info!(
+                        "TerminalView::deserialize: item_id={item_id:?}, \
+                         workspace_id={workspace_id:?}, cwd={cwd:?}, \
+                         custom_title={custom_title:?}, session_id={session_id:?}"
+                    );
+                    (cwd, custom_title, session_id)
                 })
                 .ok()
-                .unwrap_or((None, None));
+                .unwrap_or((None, None, None));
 
+            // Try to reconnect to an existing pty-host session first.
+            if let Some(session_id) = session_id {
+                let socket_path = pty_host::socket_path_for_session(&session_id);
+                let socket_exists = socket_path.exists();
+                log::info!(
+                    "TerminalView::deserialize: attempting reconnect to session {session_id}, \
+                     socket={}, exists={socket_exists}",
+                    socket_path.display()
+                );
+                if socket_exists {
+                    let reconnect_result = cx.update(|_window, cx| {
+                        use terminal::terminal_settings::TerminalSettings;
+                        use settings::Settings;
+                        let settings = TerminalSettings::get(None, cx);
+                        terminal::TerminalBuilder::from_pty_host(
+                            session_id,
+                            &socket_path,
+                            settings.cursor_shape,
+                            settings.alternate_scroll,
+                            settings.max_scroll_history_lines,
+                            &cx.background_executor(),
+                            util::paths::PathStyle::local(),
+                        )
+                    });
+
+                    if let Ok(Ok((builder, snapshot_data))) = reconnect_result {
+                        log::info!(
+                            "TerminalView::deserialize: reconnected to pty-host session \
+                             {session_id} successfully, snapshot_data={} bytes",
+                            snapshot_data.len()
+                        );
+                        let terminal = cx.update(|_window, cx| {
+                            let terminal_handle = cx.new(|cx| {
+                                // Replay data was already fed through the VTE
+                                // parser inside from_pty_host() — no need to
+                                // call terminal.input() here.
+                                builder.subscribe(cx)
+                            });
+                            terminal_handle
+                        })?;
+
+                        return cx.update(|window, cx| {
+                            cx.new(|cx| {
+                                let mut view = TerminalView::new(
+                                    terminal,
+                                    workspace,
+                                    Some(workspace_id),
+                                    project.downgrade(),
+                                    window,
+                                    cx,
+                                );
+                                if custom_title.is_some() {
+                                    view.custom_title = custom_title;
+                                }
+                                view
+                            })
+                        });
+                    } else {
+                        log::warn!(
+                            "TerminalView::deserialize: failed to reconnect to pty-host \
+                             session {session_id}: {:?}, falling back to new terminal",
+                            reconnect_result.as_ref().err().or_else(|| {
+                                reconnect_result.as_ref().ok().and_then(|r| r.as_ref().err())
+                            })
+                        );
+                    }
+                }
+            }
+
+            // Fallback: create a new terminal (today's behavior).
+            log::info!(
+                "TerminalView::deserialize: creating new terminal (no pty-host session to \
+                 reconnect to), cwd={cwd:?}"
+            );
             let terminal = project
                 .update(cx, |project, cx| project.create_terminal_shell(cwd, cx))
                 .await?;
@@ -1876,8 +1978,17 @@ impl SearchableItem for TerminalView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.terminal()
-            .update(cx, |term, _| term.matches = matches.to_vec())
+        self.terminal().update(cx, |term, _| {
+            term.matches = matches.to_vec();
+
+            // The background search task thawed all compressed rows before
+            // finding these matches. If sync() ran between then and now, it
+            // may have recompacted some of those rows, invalidating the match
+            // coordinates. Re-thaw so the coordinates are valid again.
+            if !term.matches.is_empty() {
+                term.thaw_compressed_history();
+            }
+        })
     }
 
     /// Returns the selection content to pre-load into this search

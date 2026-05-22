@@ -1,0 +1,15 @@
+[package]
+name = "pty_host_bin"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "pty-host"
+path = "src/main.rs"
+
+[dependencies]
+pty_host.workspace = true

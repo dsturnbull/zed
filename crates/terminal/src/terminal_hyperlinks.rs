@@ -67,7 +67,7 @@ impl RegexSearches {
 }
 
 pub(super) fn find_from_grid_point<T: EventListener>(
-    term: &Term<T>,
+    term: &mut Term<T>,
     point: AlacPoint,
     regex_searches: &mut RegexSearches,
     path_style: PathStyle,
@@ -1108,12 +1108,14 @@ mod tests {
             pub fn cargo_hyperlink_benchmark() {
                 const LINE: &str = "    Compiling terminal v0.1.0 (/Hyperlinks/Bench/Source/zed-hyperlinks/crates/terminal)\r\n";
                 thread_local! {
-                    static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(LINE, 500, 50);
+                    static TEST_TERM_AND_POINT: RefCell<(Term<VoidListener>, AlacPoint)> =
+                        RefCell::new(build_test_term(LINE, 500, 50));
                 }
-                TEST_TERM_AND_POINT.with(|(term, point)| {
+                TEST_TERM_AND_POINT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let (ref mut term, point) = *borrow;
                     assert_eq!(
-                        find_from_grid_point_bench(term, *point)
+                        find_from_grid_point_bench(term, point)
                             .map(|(path, ..)| path)
                             .unwrap_or_default(),
                         "/Hyperlinks/Bench/Source/zed-hyperlinks/crates/terminal",
@@ -1126,12 +1128,14 @@ mod tests {
             pub fn rust_hyperlink_benchmark() {
                 const LINE: &str = "    --> /Hyperlinks/Bench/Source/zed-hyperlinks/crates/terminal/terminal.rs:1000:42\r\n";
                 thread_local! {
-                    static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(LINE, 500, 50);
+                    static TEST_TERM_AND_POINT: RefCell<(Term<VoidListener>, AlacPoint)> =
+                        RefCell::new(build_test_term(LINE, 500, 50));
                 }
-                TEST_TERM_AND_POINT.with(|(term, point)| {
+                TEST_TERM_AND_POINT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let (ref mut term, point) = *borrow;
                     assert_eq!(
-                        find_from_grid_point_bench(term, *point)
+                        find_from_grid_point_bench(term, point)
                             .map(|(path, ..)| path)
                             .unwrap_or_default(),
                         "/Hyperlinks/Bench/Source/zed-hyperlinks/crates/terminal/terminal.rs:1000:42",
@@ -1144,12 +1148,14 @@ mod tests {
             pub fn ls_hyperlink_benchmark() {
                 const LINE: &str = "Cargo.toml        experiments        notebooks        rust-toolchain.toml    tooling\r\n";
                 thread_local! {
-                    static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(LINE, 500, 60);
+                    static TEST_TERM_AND_POINT: RefCell<(Term<VoidListener>, AlacPoint)> =
+                        RefCell::new(build_test_term(LINE, 500, 60));
                 }
-                TEST_TERM_AND_POINT.with(|(term, point)| {
+                TEST_TERM_AND_POINT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let (ref mut term, point) = *borrow;
                     assert_eq!(
-                        find_from_grid_point_bench(term, *point)
+                        find_from_grid_point_bench(term, point)
                             .map(|(path, ..)| path)
                             .unwrap_or_default(),
                         "rust-toolchain.toml",
@@ -1207,12 +1213,14 @@ mod tests {
 987, 552, -835, -912, -861, 254, 560, 124, 145, 798, 178, 476, 138, -311, 151, -907, -886, -592, 728, -43, -489, 873, -422, -439, -489, 375, -703, -459, 338, 418, -25, 332, -454, 730, -604, -800, 37, -172, -197, -568, -563, -332, 228, -182, 994, -123, 444, -567, 98, 78, 0, -504, -150, 88, -936, 199, -651, -776, 192, 46, 526, -727, -991, 534, -659, -738, 256, -894, 965, -76, 816, 435, -418, 800, 838, 67, -733, 570, 112, -514, -416\r\
 ";
                 thread_local! {
-                    static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(&LINE, 5, 50);
+                    static TEST_TERM_AND_POINT: RefCell<(Term<VoidListener>, AlacPoint)> =
+                        RefCell::new(build_test_term(&LINE, 5, 50));
                 }
-                TEST_TERM_AND_POINT.with(|(term, point)| {
+                TEST_TERM_AND_POINT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let (ref mut term, point) = *borrow;
                     assert_eq!(
-                        find_from_grid_point_bench(term, *point)
+                        find_from_grid_point_bench(term, point)
                             .map(|(path, ..)| path)
                             .unwrap_or_default(),
                         "392",
@@ -1241,12 +1249,14 @@ mod tests {
 ...............................................E.\r\
 ";
                 thread_local! {
-                    static TEST_TERM_AND_POINT: (Term<VoidListener>, AlacPoint) =
-                        build_test_term(&LINE, 5, 50);
+                    static TEST_TERM_AND_POINT: RefCell<(Term<VoidListener>, AlacPoint)> =
+                        RefCell::new(build_test_term(&LINE, 5, 50));
                 }
-                TEST_TERM_AND_POINT.with(|(term, point)| {
+                TEST_TERM_AND_POINT.with(|cell| {
+                    let mut borrow = cell.borrow_mut();
+                    let (ref mut term, point) = *borrow;
                     assert_eq!(
-                        find_from_grid_point_bench(term, *point)
+                        find_from_grid_point_bench(term, point)
                             .map(|(path, ..)| path)
                             .unwrap_or_default(),
                         LINE.trim_end_matches(['.', '\r', '\n']),
@@ -1256,7 +1266,7 @@ mod tests {
             }
 
             pub fn find_from_grid_point_bench(
-                term: &Term<VoidListener>,
+                term: &mut Term<VoidListener>,
                 point: AlacPoint,
             ) -> Option<(String, bool, Match)> {
                 const PATH_HYPERLINK_TIMEOUT_MS: u64 = 1000;
@@ -1279,7 +1289,7 @@ mod tests {
 
                 TEST_REGEX_SEARCHES.with(|regex_searches| {
                     find_from_grid_point(
-                        &term,
+                        term,
                         point,
                         &mut regex_searches.borrow_mut(),
                         PathStyle::local(),
@@ -1878,11 +1888,11 @@ mod tests {
         }
 
         let term_size = TermSize::new(columns, total_cells / columns + 2);
-        let (term, expected_hyperlink) =
+        let (mut term, expected_hyperlink) =
             build_term_from_test_lines(hyperlink_kind, term_size, test_lines);
         let hyperlink_found = TEST_REGEX_SEARCHES.with(|regex_searches| {
             find_from_grid_point(
-                &term,
+                &mut term,
                 expected_hyperlink.hovered_grid_point,
                 &mut regex_searches.borrow_mut(),
                 PathStyle::local(),

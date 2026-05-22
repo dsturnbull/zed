@@ -1737,10 +1737,62 @@ impl AgentPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.spawn_terminal_inner(
+            terminal_id,
+            working_directory,
+            custom_title,
+            initial_title,
+            created_at,
+            None,
+            select,
+            focus,
+            source,
+            window,
+            cx,
+        );
+    }
+
+    fn spawn_terminal_inner(
+        &mut self,
+        terminal_id: TerminalId,
+        working_directory: Option<PathBuf>,
+        custom_title: Option<SharedString>,
+        initial_title: Option<SharedString>,
+        created_at: Option<DateTime<Utc>>,
+        reattach_session_id: Option<uuid::Uuid>,
+        select: bool,
+        focus: bool,
+        source: AgentThreadSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let terminal_working_directory = working_directory.clone();
-        let terminal_task = self.project.update(cx, |project, cx| {
-            project.create_terminal_shell(working_directory, cx)
-        });
+        // Try to reattach to an existing pty-host session first.
+        // If the session's socket is gone or refuses connection, fall
+        // through to spawning a fresh shell.
+        let reattached: Option<Result<Entity<terminal::Terminal>>> =
+            reattach_session_id.and_then(|session_id| {
+                self.project.update(cx, |project, cx| {
+                    match project.reattach_terminal_shell(session_id, cx) {
+                        Ok(t) => Some(Ok(t)),
+                        Err(e) => {
+                            log::info!(
+                                "spawn_terminal: reattach to pty-host session \
+                                 {session_id} failed ({e:#}); spawning fresh shell"
+                            );
+                            None
+                        }
+                    }
+                })
+            });
+
+        let terminal_task = if let Some(result) = reattached {
+            Task::ready(result)
+        } else {
+            self.project.update(cx, |project, cx| {
+                project.create_terminal_shell(working_directory, cx)
+            })
+        };
         let workspace = self.workspace.clone();
         let workspace_id = self.workspace_id;
         let project = self.project.downgrade();
@@ -1999,6 +2051,12 @@ impl AgentPanel {
     ) -> Option<TerminalThreadMetadata> {
         let terminal = self.terminals.get(&terminal_id)?;
         let project = self.project.read(cx);
+        let pty_host_session_id = terminal
+            .view
+            .read(cx)
+            .terminal()
+            .read(cx)
+            .pty_host_session_id();
         Some(TerminalThreadMetadata {
             terminal_id,
             title: terminal.title(cx),
@@ -2007,6 +2065,7 @@ impl AgentPanel {
             worktree_paths: project.worktree_paths(cx),
             remote_connection: project.remote_connection_options(cx),
             working_directory: terminal.working_directory.clone(),
+            pty_host_session_id,
         })
     }
 
@@ -2031,12 +2090,13 @@ impl AgentPanel {
         self.pending_terminal_spawn = Some(metadata.terminal_id);
         let working_directory = self.terminal_restore_working_directory(&metadata, workspace, cx);
         let initial_title = Self::terminal_restore_initial_title(&metadata);
-        self.spawn_terminal(
+        self.spawn_terminal_inner(
             metadata.terminal_id,
             working_directory,
             metadata.custom_title.clone(),
             initial_title,
             Some(metadata.created_at),
+            metadata.pty_host_session_id,
             true,
             focus,
             source,

@@ -65,6 +65,8 @@ required-features = ["visual-tests"]
 [dependencies]
 acp_tools.workspace = true
 activity_indicator.workspace = true
+pty_host.workspace = true
+pty_host_bin.workspace = true
 agent.workspace = true
 agent-client-protocol.workspace = true
 agent_settings.workspace = true
