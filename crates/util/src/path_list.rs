@@ -46,11 +46,21 @@ pub struct SerializedPathList {
 
 impl PathList {
     pub fn new<P: AsRef<Path>>(paths: &[P]) -> Self {
-        let mut indexed_paths: Vec<(usize, PathBuf)> = paths
-            .iter()
-            .enumerate()
-            .map(|(ix, path)| (ix, SanitizedPath::new(path).into()))
-            .collect();
+        // De-duplicate while preserving the first-seen index so that
+        // `ordered_paths()` keeps the user's original order. Duplicates
+        // can sneak in via `WorktreeStore::paths` when a worktree is
+        // momentarily double-registered (e.g. mid git-discovery), which
+        // produced corrupt PathLists in agent thread / terminal thread
+        // metadata storage and made those rows invisible in the sidebar
+        // because the lookup key never matched.
+        let mut seen: collections::HashSet<PathBuf> = collections::HashSet::default();
+        let mut indexed_paths: Vec<(usize, PathBuf)> = Vec::with_capacity(paths.len());
+        for (ix, path) in paths.iter().enumerate() {
+            let sanitized: PathBuf = SanitizedPath::new(path).into();
+            if seen.insert(sanitized.clone()) {
+                indexed_paths.push((ix, sanitized));
+            }
+        }
         indexed_paths.sort_by(|(_, a), (_, b)| a.cmp(b));
         let order = indexed_paths.iter().map(|e| e.0).collect::<Vec<_>>().into();
         let paths = indexed_paths
@@ -104,27 +114,41 @@ impl PathList {
     }
 
     pub fn deserialize(serialized: &SerializedPathList) -> Self {
-        let mut paths: Vec<PathBuf> = if serialized.paths.is_empty() {
+        let paths_vec: Vec<PathBuf> = if serialized.paths.is_empty() {
             Vec::new()
         } else {
             serialized.paths.split('\n').map(PathBuf::from).collect()
         };
 
-        let mut order: Vec<usize> = serialized
+        let order_vec: Vec<usize> = serialized
             .order
             .split(',')
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        if !paths.is_sorted() || order.len() != paths.len() {
-            order = (0..paths.len()).collect();
-            paths.sort();
+        // Round-trip through `new` so that legacy rows with duplicate
+        // path entries — e.g. metadata persisted while `WorktreeStore`
+        // was mid git-discovery and double-registered the same worktree
+        // — self-heal on first read instead of staying corrupt forever.
+        // The `order` is reconstructed from the serialized indices when
+        // they're well-formed, otherwise from input order.
+        let order_valid = order_vec.len() == paths_vec.len();
+        if order_valid {
+            let mut indexed: Vec<(usize, PathBuf)> = paths_vec
+                .into_iter()
+                .zip(order_vec.iter().copied())
+                .map(|(path, ix)| (ix, path))
+                .collect();
+            // Replay the original first-seen order through `new` so
+            // duplicates collapse the same way they would on a fresh
+            // construction. This loses any sort-key ambiguity but
+            // preserves user-visible insertion order.
+            indexed.sort_by_key(|(ix, _)| *ix);
+            let originals: Vec<PathBuf> = indexed.into_iter().map(|(_, p)| p).collect();
+            return Self::new(&originals);
         }
 
-        Self {
-            paths: paths.into(),
-            order: order.into(),
-        }
+        Self::new(&paths_vec)
     }
 
     pub fn serialize(&self) -> SerializedPathList {
@@ -229,5 +253,63 @@ mod tests {
                 &PathBuf::from("a"),
             ]
         );
+    }
+
+    /// Duplicate input paths must be collapsed. `WorktreeStore::paths`
+    /// can yield the same worktree twice during git-discovery races
+    /// (once with its main resolved, once falling back to its own folder
+    /// path). When that snapshot was persisted in agent-thread or
+    /// terminal-thread metadata as `PathList::new(&[a, a])`, the resulting
+    /// list compared unequal to a clean `PathList::new(&[a])` and the
+    /// stored row went invisible in the sidebar even though
+    /// `entries_for_path` would otherwise have found it.
+    #[test]
+    fn test_path_list_dedups_input() {
+        let dup = PathList::new(&["a", "a"]);
+        let single = PathList::new(&["a"]);
+        assert_eq!(
+            dup, single,
+            "PathList::new must collapse duplicate input paths"
+        );
+        assert_eq!(dup.paths(), &[PathBuf::from("a")]);
+        assert_eq!(dup.order(), &[0]);
+
+        let dup_multi = PathList::new(&["b", "a", "b", "c", "a"]);
+        let clean_multi = PathList::new(&["b", "a", "c"]);
+        assert_eq!(
+            dup_multi, clean_multi,
+            "PathList::new must dedup while preserving first-seen order"
+        );
+        // First-seen order is preserved: b, a, c
+        assert_eq!(
+            dup_multi.ordered_paths().collect_array().unwrap(),
+            [
+                &PathBuf::from("b"),
+                &PathBuf::from("a"),
+                &PathBuf::from("c"),
+            ]
+        );
+    }
+
+    /// Existing DB rows can hold duplicate-bearing serialized PathLists
+    /// from before the dedup landed in `new`. Deserialize must collapse
+    /// the duplicates so those rows self-heal on first read.
+    #[test]
+    fn test_path_list_deserialize_dedups_legacy_rows() {
+        // The shape we observed in `sidebar_terminal_threads.folder_paths`:
+        // path "a" stored twice, with the second copy as the second
+        // element. This is exactly what the worktree-discovery race
+        // produces when the same worktree gets snapshotted twice.
+        let corrupt = SerializedPathList {
+            paths: "a\na".to_string(),
+            order: "0,1".to_string(),
+        };
+        let healed = PathList::deserialize(&corrupt);
+        assert_eq!(
+            healed,
+            PathList::new(&["a"]),
+            "deserialized PathList must dedup duplicate input paths"
+        );
+        assert_eq!(healed.paths(), &[PathBuf::from("a")]);
     }
 }
