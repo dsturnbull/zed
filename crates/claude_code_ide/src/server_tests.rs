@@ -132,6 +132,8 @@ async fn initialize_and_list_tools_round_trip(cx: &mut TestAppContext) {
         .collect();
     assert!(names.contains(&"getCurrentSelection".to_string()));
     assert!(names.contains(&"getWorkspaceFolders".to_string()));
+    assert!(names.contains(&"getDiagnostics".to_string()));
+    assert!(names.contains(&"getOpenEditors".to_string()));
     assert!(names.contains(&"executeCode".to_string()));
 
     assert_eq!(err["id"], 3);

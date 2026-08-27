@@ -3090,6 +3090,7 @@ dependencies = [
  "language",
  "libc",
  "log",
+ "multi_buffer",
  "net",
  "paths",
  "project",

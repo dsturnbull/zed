@@ -17,9 +17,11 @@
 //! - <https://github.com/coder/claudecode.nvim/blob/main/PROTOCOL.md>
 
 pub mod bridge;
+pub mod fileops;
 pub mod lockfile;
 pub mod peer_cred;
 pub mod protocol;
+pub mod queries;
 pub mod selection;
 pub mod selection_socket;
 pub mod server;

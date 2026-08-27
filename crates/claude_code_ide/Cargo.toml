@@ -21,6 +21,7 @@ futures.workspace = true
 gpui.workspace = true
 language.workspace = true
 log.workspace = true
+multi_buffer.workspace = true
 net.workspace = true
 paths.workspace = true
 project.workspace = true

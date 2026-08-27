@@ -243,6 +243,11 @@ impl Default for SharedSelection {
 /// Code surfaces each one to the model as `mcp__ide__<name>`.
 pub fn tools() -> Value {
     let none = json!({ "type": "object", "properties": {} });
+    let path_arg = json!({
+        "type": "object",
+        "properties": { "filePath": { "type": "string" } },
+        "required": ["filePath"],
+    });
     let tool = |name: &str, description: &str, input_schema: Value| {
         json!({ "name": name, "description": description, "inputSchema": input_schema })
     };
@@ -250,6 +255,22 @@ pub fn tools() -> Value {
         tool("getCurrentSelection", "Get the active editor's current text selection.", none.clone()),
         tool("getLatestSelection", "Get the most recent text selection across editors.", none.clone()),
         tool("getWorkspaceFolders", "Get the workspace's root folders.", none.clone()),
+        tool("getDiagnostics", "Get language diagnostics, optionally scoped to a file URI.",
+            json!({ "type": "object", "properties": { "uri": { "type": "string" } } })),
+        tool("getOpenEditors", "List the currently open editor tabs.", none.clone()),
+        tool("openFile", "Open a file, optionally selecting a line range.",
+            json!({
+                "type": "object",
+                "properties": {
+                    "filePath": { "type": "string" },
+                    "startLine": { "type": "integer" },
+                    "endLine": { "type": "integer" },
+                },
+                "required": ["filePath"],
+            })),
+        tool("saveDocument", "Save a document by file path.", path_arg.clone()),
+        tool("checkDocumentDirty", "Check whether a document has unsaved changes.", path_arg.clone()),
+        tool("close_tab", "Close the tab for a file path.", path_arg),
         tool("openDiff", "Open a diff for review.",
             json!({
                 "type": "object",

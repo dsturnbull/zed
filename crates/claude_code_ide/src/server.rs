@@ -378,6 +378,18 @@ async fn call_tool(
             selection::current_selection_result(selection, cx).await
         }
         "getWorkspaceFolders" => selection::workspace_folders_result(selection, cx).await,
+        "getDiagnostics" => {
+            crate::queries::diagnostics_result(selection, &params.arguments, cx).await
+        }
+        "getOpenEditors" => crate::queries::open_editors_result(selection, cx),
+        "openFile" => crate::fileops::open_file(selection, &params.arguments, cx).await,
+        "saveDocument" => crate::fileops::save_document(selection, &params.arguments, cx).await,
+        "checkDocumentDirty" => {
+            crate::fileops::check_document_dirty(selection, &params.arguments, cx).await
+        }
+        "close_tab" | "closeTab" => {
+            crate::fileops::close_tab(selection, &params.arguments, cx).await
+        }
         // Claude Code calls closeAllDiffTabs unprompted on connect, and drives
         // openDiff from its edit flow, so both must answer or every connection and
         // every edit reports an error. Acknowledging is not implementing: an

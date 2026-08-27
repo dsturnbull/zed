@@ -112,3 +112,21 @@ pub fn cleared_selection() -> Value {
     json!({ "text": "", "filePath": "", "fileUrl": "", "selection": Value::Null })
 }
 
+/// Arguments for `openFile`.
+#[derive(Debug, Deserialize)]
+pub struct OpenFileArgs {
+    #[serde(rename = "filePath", alias = "uri", alias = "path")]
+    pub file_path: String,
+    #[serde(rename = "startLine", default)]
+    pub start_line: Option<u32>,
+    #[serde(rename = "endLine", default)]
+    pub end_line: Option<u32>,
+}
+
+/// Arguments for a tool that names a single file path or uri.
+#[derive(Debug, Deserialize)]
+pub struct FilePathArg {
+    #[serde(rename = "filePath", alias = "uri", alias = "path", alias = "tab_name")]
+    pub file_path: String,
+}
+
